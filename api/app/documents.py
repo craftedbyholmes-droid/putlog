@@ -1,5 +1,5 @@
 """Filling Word templates safely, checking required fields, padding logos and converting to PDF."""
-import html, io, os, shutil, subprocess, tempfile, zipfile, re
+import html, io, os, pathlib, shutil, subprocess, tempfile, zipfile, re
 from docxtpl import DocxTemplate
 from jinja2.sandbox import SandboxedEnvironment
 from PIL import Image
@@ -65,6 +65,9 @@ def missing_required(kind: str, context: dict, *, logo_present: bool = True) -> 
         missing.append("firm logo (upload it in Settings)")
     return missing
 
+class PdfConversionError(RuntimeError):
+    """LibreOffice is installed but this conversion failed or timed out."""
+
 def soffice_path() -> str | None:
     return os.environ.get("SOFFICE_PATH") or shutil.which("soffice") or shutil.which("libreoffice")
 
@@ -75,6 +78,17 @@ def to_pdf(docx_bytes: bytes, timeout: int = 120) -> bytes | None:
     with tempfile.TemporaryDirectory() as d:
         src = os.path.join(d, "doc.docx")
         with open(src, "wb") as fh: fh.write(docx_bytes)
-        subprocess.run([exe, f"-env:UserInstallation=file://{d}/profile", "--headless", "--convert-to", "pdf",
-                        "--outdir", d, src], check=True, timeout=timeout, capture_output=True)
-        with open(os.path.join(d, "doc.pdf"), "rb") as fh: return fh.read()
+        # A proper file URI on every OS: file:///C:/Users/... on Windows, file:///tmp/... on Linux.
+        # A malformed one makes LibreOffice report "bootstrap.ini is corrupt" and exit.
+        profile = pathlib.Path(d, "profile").as_uri()
+        cmd = [exe, f"-env:UserInstallation={profile}", "--headless", "--norestore", "--nolockcheck",
+               "--convert-to", "pdf", "--outdir", d, src]
+        try:
+            r = subprocess.run(cmd, timeout=timeout, capture_output=True)
+        except subprocess.TimeoutExpired:
+            raise PdfConversionError(f"PDF conversion timed out after {timeout} seconds")
+        pdf_path = os.path.join(d, "doc.pdf")
+        if r.returncode != 0 or not os.path.exists(pdf_path):
+            detail = (r.stderr or r.stdout or b"").decode("utf8", "ignore").strip()[:500]
+            raise PdfConversionError(f"PDF conversion failed (LibreOffice exit code {r.returncode}): {detail or 'no output'}")
+        with open(pdf_path, "rb") as fh: return fh.read()

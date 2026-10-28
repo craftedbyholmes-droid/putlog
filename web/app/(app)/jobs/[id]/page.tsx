@@ -1,0 +1,271 @@
+"use client";
+import { use, useCallback, useEffect, useState } from "react";
+import { supabase } from "@/lib/supabase";
+import { api, download } from "@/lib/api";
+import { Badge, Button, Card, CardHeader, Empty, Field, Input, Modal, Notice, Select } from "@/components/ui";
+import { ConfirmErectedModal, InspectionModal, SheetModal } from "@/components/scaffold/actions";
+import { cn, ftIn, gbp, ukDate } from "@/lib/utils";
+import { HakiResult } from "@/components/HakiResult";
+
+type Msg = { ok: boolean; text: string } | null;
+const STATUS_TONE: Record<string, any> = { planned: "slate", rams_raised: "violet", erecting: "blue", on_hire: "green", dismantle_requested: "amber", dismantling: "amber", dismantled: "slate" };
+
+export default function JobPage({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = use(params);
+  const [job, setJob] = useState<any>(null); const [staff, setStaff] = useState<any[]>([]); const [quotes, setQuotes] = useState<any[]>([]);
+  const [docs, setDocs] = useState<any[]>([]); const [me, setMe] = useState<any>(null); const [msg, setMsg] = useState<Msg>(null);
+  const [newScaffold, setNewScaffold] = useState<string | null>(null); const [newSite, setNewSite] = useState(false);
+  const load = useCallback(async () => {
+    const sb = supabase();
+    const { data: u } = await sb.auth.getUser();
+    const [{ data: j }, { data: st }, { data: q }, { data: d }, { data: p }] = await Promise.all([
+      sb.from("jobs").select("*, clients(*), sites(*, scaffolds(*, job_elevations(*)))").eq("id", id).single(),
+      sb.from("staff").select("id, name, phone").eq("active", true).order("name"),
+      sb.from("quotes").select("id, number, issued_at, vat_registered, vat_rate, quote_lines(line_total)").eq("job_id", id).order("number", { ascending: false }),
+      sb.from("compliance_docs").select("*, handovers(*), compliance_sheets(*), bespoke_designs(*)").order("created_at"),
+      sb.from("profiles").select("role, company_id").eq("id", u.user!.id).single(),
+    ]);
+    setJob(j); setStaff(st ?? []); setQuotes(q ?? []); setDocs(d ?? []); setMe(p);
+  }, [id]);
+  useEffect(() => { load(); }, [load]);
+  if (!job) return <p className="text-sm text-slate-500">Loading…</p>;
+  const sb = supabase();
+  const saveJob = async (patch: any) => { const { error } = await sb.from("jobs").update(patch).eq("id", id); if (error) setMsg({ ok: false, text: error.message }); else load(); };
+  const buildQuote = async () => { try { const r = await api(`/jobs/${id}/quotes`, { method: "POST" }); setMsg({ ok: true, text: `Quote ${r.number} created: ${gbp(r.total)}.` }); load(); } catch (e: any) { setMsg({ ok: false, text: e.message }); } };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div><h1 className="text-2xl font-semibold">{job.reference} · {job.clients?.company_name || job.clients?.name}</h1><p className="text-sm text-slate-500">{job.scope || "No scope entered"}</p></div>
+        <div className="flex items-center gap-2"><Badge tone="blue">{job.status}</Badge>
+          <Select className="w-40" value={job.status} onChange={(e) => saveJob({ status: e.target.value })}>
+            {["enquiry", "quoted", "accepted"].map((s) => <option key={s} value={s}>{s[0].toUpperCase() + s.slice(1)}</option>)}
+            {["invoiced", "paid", "closed"].includes(job.status) && <option value={job.status}>{job.status}</option>}
+          </Select></div>
+      </div>
+      <Notice msg={msg} onClose={() => setMsg(null)} />
+
+      <Card><CardHeader title="Job details" />
+        <div className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-4">
+          <Field label="Supervisor (goes on the RAMS)"><Select value={job.supervisor_staff_id ?? ""} onChange={(e) => saveJob({ supervisor_staff_id: e.target.value || null })}><option value="">Choose…</option>{staff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</Select></Field>
+          <Field label="Emergency contact"><Input defaultValue={job.emergency_contact_name ?? ""} onBlur={(e) => saveJob({ emergency_contact_name: e.target.value })} /></Field>
+          <Field label="Emergency phone"><Input defaultValue={job.emergency_contact_phone ?? ""} inputMode="tel" onBlur={(e) => saveJob({ emergency_contact_phone: e.target.value })} /></Field>
+          <Field label="Hire clock starts on"><Select value={job.hire_start_trigger} onChange={(e) => saveJob({ hire_start_trigger: e.target.value })}><option value="job_up_confirmed">Job up confirmed</option><option value="handover_emailed">Handover emailed</option></Select></Field>
+        </div>
+      </Card>
+
+      {(job.sites ?? []).map((site: any) => (
+        <Card key={site.id}>
+          <CardHeader title={`Site: ${site.address}${site.postcode ? ", " + site.postcode : ""}`} action={<Button size="sm" variant="secondary" onClick={() => setNewScaffold(site.id)}>Add scaffold</Button>} />
+          <div className="space-y-4 p-4">
+            {(site.scaffolds ?? []).length === 0 && <Empty>No scaffolds yet. Add one for each elevation or tower you will hire separately.</Empty>}
+            {(site.scaffolds ?? []).sort((a: any, b: any) => a.name.localeCompare(b.name)).map((s: any) => (
+              <ScaffoldPanel key={s.id} s={s} docs={docs.filter((d) => d.scaffold_id === s.id)} isOwner={me?.role === "owner"} companyId={me?.company_id} onMsg={setMsg} reload={load} />
+            ))}
+          </div>
+        </Card>
+      ))}
+      <Button variant="secondary" onClick={() => setNewSite(true)}>Add another site</Button>
+
+      <Card><CardHeader title="Quotes" action={<Button size="sm" onClick={buildQuote}>Build quote from measurements</Button>} />
+        <div className="divide-y">{quotes.length === 0 ? <p className="p-4 text-sm text-slate-500">No quote yet. Enter elevations (or run the HAKI calculator) and set your rates in Settings, then build the quote.</p> : quotes.map((q) => {
+          const net = (q.quote_lines ?? []).reduce((a: number, l: any) => a + Number(l.line_total), 0);
+          const gross = q.vat_registered ? net * (1 + Number(q.vat_rate) / 100) : net;
+          return (
+            <div key={q.id} className="flex flex-wrap items-center justify-between gap-2 p-3 text-sm">
+              <div><span className="font-medium">{q.number}</span> · {ukDate(q.issued_at)} · {gbp(Math.round(gross * 100) / 100)}{q.vat_registered ? " inc. VAT" : ""}</div>
+              <div className="flex gap-2"><Button size="sm" variant="secondary" onClick={() => download(`/quotes/${q.id}/pdf`, `${q.number}.pdf`).catch((e) => setMsg({ ok: false, text: e.message }))}>PDF</Button>
+                <Button size="sm" variant="secondary" onClick={() => download(`/quotes/${q.id}/docx`, `${q.number}.docx`)}>Word</Button>
+                <Button size="sm" variant="secondary" onClick={() => download(`/quotes/${q.id}/csv`, `${q.number}.csv`)}>CSV</Button></div>
+            </div>); })}
+        </div>
+      </Card>
+
+      {newScaffold && <NewScaffoldModal siteId={newScaffold} companyId={me?.company_id} onClose={() => setNewScaffold(null)} onSaved={() => { setNewScaffold(null); load(); }} />}
+      {newSite && <NewSiteModal jobId={id} companyId={me?.company_id} onClose={() => setNewSite(false)} onSaved={() => { setNewSite(false); load(); }} />}
+    </div>
+  );
+}
+
+function NewSiteModal({ jobId, companyId, onClose, onSaved }: any) {
+  const [f, setF] = useState({ address: "", postcode: "" });
+  const save = async () => { const { error } = await supabase().from("sites").insert({ ...f, job_id: jobId, company_id: companyId }); if (error) alert(error.message); else onSaved(); };
+  return <Modal open onClose={onClose} title="Add site"><div className="space-y-3"><Field label="Address"><Input value={f.address} onChange={(e) => setF({ ...f, address: e.target.value })} /></Field><Field label="Postcode"><Input value={f.postcode} onChange={(e) => setF({ ...f, postcode: e.target.value.toUpperCase() })} /></Field><Button onClick={save}>Save</Button></div></Modal>;
+}
+
+function NewScaffoldModal({ siteId, companyId, onClose, onSaved }: any) {
+  const [f, setF] = useState<any>({ name: "", kind: "tube_fitting", pricing_mode: "squareage", first_lift_m: 2.0, lift_m: 2.0, item_no: 1, planned_start_date: "", planned_days: "" });
+  useEffect(() => { (async () => { const { data } = await supabase().from("companies").select("default_first_lift_m").eq("id", companyId).single(); if (data) setF((x: any) => ({ ...x, first_lift_m: Number(data.default_first_lift_m) })); })(); }, [companyId]);
+  const save = async () => {
+    if (!f.name.trim()) return alert("Give the scaffold a name, e.g. Front elevation.");
+    const row = { ...f, site_id: siteId, company_id: companyId, planned_start_date: f.planned_start_date || null, planned_days: f.planned_days || null };
+    const { error } = await supabase().from("scaffolds").insert(row); if (error) alert(error.message); else onSaved();
+  };
+  const tower = f.kind === "haki_stair_tower";
+  return (
+    <Modal open onClose={onClose} title="Add scaffold" wide>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label="Name / work area"><Input placeholder="e.g. Front elevation" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></Field>
+        <Field label="Type"><Select value={f.kind} onChange={(e) => setF({ ...f, kind: e.target.value, pricing_mode: e.target.value === "haki_stair_tower" ? "height" : "squareage" })}><option value="tube_fitting">Tube and fitting</option><option value="haki_stair_tower">HAKI stair tower</option></Select></Field>
+        <Field label="Priced by" hint="HAKI and tube-and-fitting are priced separately">
+          <Select value={f.pricing_mode} onChange={(e) => setF({ ...f, pricing_mode: e.target.value })}>
+            {tower ? (<><option value="height">£ per vertical metre</option><option value="component">Components</option></>) : (<><option value="squareage">£ per m² (squareage)</option><option value="meterage">£ per metre run (meterage)</option></>)}
+          </Select></Field>
+        {!tower && <FirstLift value={f.first_lift_m} onChange={(v) => setF({ ...f, first_lift_m: v })} />}
+        <Field label="Planned start (for the RAMS)"><Input type="date" value={f.planned_start_date} onChange={(e) => setF({ ...f, planned_start_date: e.target.value })} /></Field>
+        <Field label="Planned days to erect"><Input inputMode="numeric" value={f.planned_days} onChange={(e) => setF({ ...f, planned_days: e.target.value })} /></Field>
+      </div>
+      <div className="mt-4 flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button onClick={save}>Save scaffold</Button></div>
+    </Modal>
+  );
+}
+
+function FirstLift({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  const preset = value === 2 ? "2" : value === 3 ? "3" : "custom";
+  return (
+    <Field label="Bottom lift" hint={value > 2 ? "Above 2 m: a bespoke design by a competent person is needed (no standard TG20 sheet covers it)." : "The only lift you can change; every lift above is 2 m."}>
+      <div className="flex gap-2">
+        <Select className="w-44" value={preset} onChange={(e) => onChange(e.target.value === "custom" ? 2.5 : Number(e.target.value))}><option value="2">7 ft (2.0 m)</option><option value="3">10 ft (3.0 m)</option><option value="custom">Custom</option></Select>
+        {preset === "custom" && <Input inputMode="decimal" className="w-28" value={value} onChange={(e) => onChange(Number(e.target.value))} />}
+      </div>
+    </Field>
+  );
+}
+
+function ScaffoldPanel({ s, docs, isOwner, companyId, onMsg, reload }: any) {
+  const [modal, setModal] = useState<"" | "sheet" | "erect" | "inspect" | "signed">("");
+  const [busy, setBusy] = useState(false);
+  const act = async (fn: () => Promise<any>, ok: (r: any) => string) => { setBusy(true); try { const r = await fn(); onMsg({ ok: true, text: ok(r) }); reload(); } catch (e: any) { onMsg({ ok: false, text: e.message }); } setBusy(false); };
+  const rams = docs.filter((d: any) => d.type === "rams").sort((a: any, b: any) => b.revision_no - a.revision_no)[0];
+  const sheet = docs.find((d: any) => ["tg20_21", "tg30", "bespoke_design"].includes(d.type));
+  const pendingHandover = docs.find((d: any) => d.type === "handover" && (Array.isArray(d.handovers) ? d.handovers[0] : d.handovers)?.signature_status === "pending");
+  const tower = s.kind === "haki_stair_tower";
+  return (
+    <div className="rounded-lg border">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-slate-50 px-3 py-2">
+        <div className="flex flex-wrap items-center gap-2"><span className="font-semibold">{s.name}</span><Badge tone={STATUS_TONE[s.status]}>{s.status.replace("_", " ")}</Badge><Badge tone={tower ? "violet" : "slate"}>{tower ? "HAKI tower" : "Tube & fitting"}</Badge>{pendingHandover && <Badge tone="red">Handover unsigned</Badge>}</div>
+        <div className="text-xs text-slate-500">{tower ? "" : `Bottom lift ${s.first_lift_m} m (${ftIn(Number(s.first_lift_m) * 1000)})`}{s.planned_start_date ? ` · planned ${ukDate(s.planned_start_date)}` : ""}</div>
+      </div>
+      <div className="grid gap-4 p-3 lg:grid-cols-2">
+        <div>{tower ? <HakiPanel s={s} onMsg={onMsg} reload={reload} /> : <Elevations s={s} companyId={companyId} reload={reload} />}</div>
+        <div className="space-y-3">
+          <div className="text-sm font-semibold">Compliance</div>
+          <ol className="space-y-2 text-sm">
+            <Step done={!!sheet} label={sheet ? `${sheet.type === "bespoke_design" ? "Bespoke design" : sheet.type === "tg30" ? "TG30 sheet" : "TG20:21 sheet"} ${sheet.reference ?? ""}` : "Compliance sheet or bespoke design"} action={!sheet && <Button size="sm" variant="secondary" onClick={() => setModal("sheet")}>Record</Button>} />
+            <Step done={!!rams} label={rams ? `RAMS pack revision ${rams.revision_no}${rams.issued_at ? `, issued ${ukDate(rams.issued_at)}` : " (draft)"}` : "RAMS pack"} action={
+              <div className="flex gap-1"><Button size="sm" variant="secondary" disabled={busy} onClick={() => act(() => api(`/scaffolds/${s.id}/rams`, { method: "POST" }), (r) => `RAMS revision ${r.revision} generated.` + (r.missing.length ? ` Fill before issue: ${r.missing.join(", ")}.` : " Ready to issue."))}>{rams ? (rams.issued_at ? "New revision" : "Regenerate") : "Generate"}</Button>
+                {rams && !rams.issued_at && <Button size="sm" disabled={busy || rams.missing_fields?.length > 0} onClick={() => act(() => api(`/scaffolds/${s.id}/rams/issue`, { method: "POST" }), () => "RAMS issued. It can no longer be changed; changes need a new revision.")}>Issue</Button>}</div>} />
+            {rams?.missing_fields?.length > 0 && !rams.issued_at && <li className="ml-6 text-xs text-amber-700">Empty before issue: {rams.missing_fields.join(", ")}</li>}
+            <Step done={["on_hire", "dismantle_requested", "dismantling", "dismantled"].includes(s.status)} label={s.erected_at ? `Erected ${ukDate(s.erected_at)}` : "Confirm erected"} action={!s.erected_at && <Button size="sm" onClick={() => setModal("erect")}>Confirm erected</Button>} />
+            {pendingHandover && <li className="ml-6 flex flex-wrap items-center gap-2 text-xs text-red-700">Handover {pendingHandover.reference} is not signed.{isOwner && <Button size="sm" variant="secondary" onClick={() => setModal("signed")}>Record client confirmation</Button>}</li>}
+            {s.erected_at && <Step done={false} label="Inspection report" action={<Button size="sm" variant="secondary" onClick={() => setModal("inspect")}>New inspection</Button>} />}
+          </ol>
+          <DocList docs={docs} />
+        </div>
+      </div>
+      {modal === "sheet" && <SheetModal scaffoldId={s.id} open onClose={() => setModal("")} onDone={(m) => { onMsg(m); reload(); }} />}
+      {modal === "erect" && <ConfirmErectedModal scaffoldId={s.id} open onClose={() => setModal("")} onDone={(m) => { onMsg(m); reload(); }} />}
+      {modal === "inspect" && <InspectionModal scaffoldId={s.id} open onClose={() => setModal("")} onDone={(m) => { onMsg(m); reload(); }} />}
+      {modal === "signed" && pendingHandover && <SignedModal docId={pendingHandover.id} onClose={() => setModal("")} onDone={(m: any) => { onMsg(m); reload(); }} />}
+    </div>
+  );
+}
+
+function Step({ done, label, action }: { done: boolean; label: string; action?: React.ReactNode }) {
+  return <li className="flex flex-wrap items-center justify-between gap-2"><span className="flex items-center gap-2"><span className={cn("flex h-5 w-5 items-center justify-center rounded-full text-[11px] text-white", done ? "bg-green-600" : "bg-slate-300")}>{done ? "✓" : ""}</span>{label}</span>{action}</li>;
+}
+
+function DocList({ docs }: { docs: any[] }) {
+  const files = docs.flatMap((d: any) => Object.entries(d.files ?? {}).map(([k, v]: any) => ({ d, k, v })));
+  if (!files.length) return null;
+  const names: Record<string, string> = { method_statement: "Method statement", risk_assessment: "Risk assessment", handover: "Handover certificate", inspection: "Inspection report" };
+  return (
+    <div className="rounded-md border"><div className="border-b px-3 py-1.5 text-xs font-semibold text-slate-600">Documents</div>
+      {files.map(({ d, k, v }, i) => (
+        <div key={i} className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 text-xs">
+          <span>{names[k] ?? k} · {d.reference ?? ""}{d.type === "rams" ? ` r${d.revision_no}` : ""}{d.issued_at ? " · issued" : " · draft"}</span>
+          <span className="flex gap-1">{v.pdf && <Button size="sm" variant="ghost" onClick={() => download(`/files?path=${encodeURIComponent(v.pdf)}`, v.pdf.split("/").pop())}>PDF</Button>}<Button size="sm" variant="ghost" onClick={() => download(`/files?path=${encodeURIComponent(v.docx)}`, v.docx.split("/").pop())}>Word</Button></span>
+        </div>))}
+    </div>
+  );
+}
+
+function SignedModal({ docId, onClose, onDone }: any) {
+  const [f, setF] = useState({ name: "", role: "", company: "", evidence_note: "", channel: "email" });
+  const go = async () => { try { await api(`/handovers/${docId}/mark-signed`, { method: "POST", body: JSON.stringify(f) }); onDone({ ok: true, text: "Handover resolved. The certificate shows it was confirmed by message and recorded by you, not signed." }); onClose(); } catch (e: any) { onDone({ ok: false, text: e.message }); } };
+  return (
+    <Modal open onClose={onClose} title="Record the client's confirmation">
+      <p className="mb-3 text-sm text-slate-600">Owner only. Use this when the client's named person confirmed by email or text. The certificate will say it was recorded by you, so it never looks like a signature.</p>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label="Their name"><Input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></Field>
+        <Field label="Their role"><Input value={f.role} onChange={(e) => setF({ ...f, role: e.target.value })} /></Field>
+        <Field label="Their company"><Input value={f.company} onChange={(e) => setF({ ...f, company: e.target.value })} /></Field>
+        <Field label="How they confirmed"><Select value={f.channel} onChange={(e) => setF({ ...f, channel: e.target.value })}><option value="email">Email</option><option value="sms">Text message</option></Select></Field>
+        <Field label="Evidence *" className="sm:col-span-2" hint="e.g. Email from J Bloggs, 3 Nov 2026, 16:40, 'all good, accepted'"><Input value={f.evidence_note} onChange={(e) => setF({ ...f, evidence_note: e.target.value })} /></Field>
+      </div>
+      <div className="mt-4 flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button onClick={go}>Record</Button></div>
+    </Modal>
+  );
+}
+
+function Elevations({ s, companyId, reload }: any) {
+  const [rows, setRows] = useState<any[]>(s.job_elevations ?? []);
+  useEffect(() => setRows(s.job_elevations ?? []), [s.job_elevations]);
+  const add = async () => { await supabase().from("job_elevations").insert({ scaffold_id: s.id, company_id: companyId, label: String.fromCharCode(65 + rows.length) }); reload(); };
+  const upd = async (id: string, patch: any) => { await supabase().from("job_elevations").update(patch).eq("id", id); reload(); };
+  const del = async (id: string) => { await supabase().from("job_elevations").delete().eq("id", id); reload(); };
+  const total = rows.reduce((a, r) => a + Number(r.quoted_area_m2 ?? 0), 0);
+  const height = Math.max(0, ...rows.map((r) => Number(r.quoted_height_m ?? 0)));
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between"><span className="text-sm font-semibold">Elevations</span><Button size="sm" variant="secondary" onClick={add}>Add elevation</Button></div>
+      {rows.length === 0 ? <p className="text-xs text-slate-500">Enter each elevation's length and height once. Wages and hire reuse them.</p> : (
+        <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left text-xs text-slate-500"><th>Elev.</th><th>Length m</th><th>Height m</th><th>Area m²</th><th title="As-built changes pay, never the quote">As-built L × H</th><th /></tr></thead>
+          <tbody>{rows.map((r) => (
+            <tr key={r.id} className="border-t">
+              <td><Input className="min-h-8 w-14" defaultValue={r.label ?? ""} onBlur={(e) => upd(r.id, { label: e.target.value })} /></td>
+              <td><Input className="min-h-8 w-20" inputMode="decimal" defaultValue={r.quoted_length_m ?? ""} onBlur={(e) => upd(r.id, { quoted_length_m: e.target.value || null })} /></td>
+              <td><Input className="min-h-8 w-20" inputMode="decimal" defaultValue={r.quoted_height_m ?? ""} onBlur={(e) => upd(r.id, { quoted_height_m: e.target.value || null })} /></td>
+              <td className="px-1 font-medium">{r.quoted_area_m2 ?? "—"}</td>
+              <td className="whitespace-nowrap"><Input className="inline min-h-8 w-16" inputMode="decimal" defaultValue={r.asbuilt_length_m ?? ""} onBlur={(e) => upd(r.id, { asbuilt_length_m: e.target.value || null })} /> × <Input className="inline min-h-8 w-16" inputMode="decimal" defaultValue={r.asbuilt_height_m ?? ""} onBlur={(e) => upd(r.id, { asbuilt_height_m: e.target.value || null })} /></td>
+              <td><Button size="sm" variant="ghost" onClick={() => del(r.id)}>✕</Button></td>
+            </tr>))}</tbody></table>
+          <div className="mt-1 text-right text-sm">Quoted area <b>{total.toFixed(2)} m²</b></div></div>)}
+      {height > 0 && <LiftLayout s={s} height={height} />}
+    </div>
+  );
+}
+
+function LiftLayout({ s, height }: { s: any; height: number }) {
+  const [opts, setOpts] = useState<any[]>([]); const [err, setErr] = useState("");
+  useEffect(() => { api("/lifts/layout", { method: "POST", body: JSON.stringify({ height_m: height, first_lift_m: Number(s.first_lift_m), lift_m: Number(s.lift_m) }) }).then(setOpts).catch((e) => setErr(e.message)); }, [height, s.first_lift_m, s.lift_m]);
+  if (err) return <p className="text-xs text-red-700">{err}</p>;
+  return (
+    <div className="rounded-md bg-slate-50 p-2 text-xs">
+      <div className="mb-1 font-semibold">Lift layout for {height} m</div>
+      {opts.map((o) => (
+        <div key={o.kind} className="py-0.5"><b className="capitalize">{o.kind}</b>: lifts at {o.levels_m.join(", ")} m ({o.diff_mm >= 0 ? "+" : ""}{o.diff_mm} mm){o.kind === "level" && o.first_lift_m !== Number(s.first_lift_m) ? `, bottom lift ${o.first_lift_m} m` : ""}
+          {o.step_warning && <span className="block text-amber-700">{o.step_warning}</span>}{o.bespoke_design && <span className="block text-red-700">Bottom lift above 2 m: needs a bespoke design.</span>}</div>))}
+    </div>
+  );
+}
+
+function HakiPanel({ s, onMsg, reload }: any) {
+  const [f, setF] = useState({ target_m: Number(s.target_height_m ?? 6), lift_m: 2, orientation: "width_against", per_metre: "" });
+  const [r, setR] = useState<any>(null);
+  const run = async () => { try { setR(await api("/haki/calculate", { method: "POST", body: JSON.stringify({ ...f, pricing_mode: s.pricing_mode, per_metre: f.per_metre ? Number(f.per_metre) : null }) })); } catch (e: any) { onMsg({ ok: false, text: e.message }); } };
+  const save = async () => { try { await api(`/scaffolds/${s.id}/haki`, { method: "POST", body: JSON.stringify({ ...f, pricing_mode: s.pricing_mode }) }); onMsg({ ok: true, text: "Tower saved to this scaffold. Build the quote to price it." }); reload(); } catch (e: any) { onMsg({ ok: false, text: e.message }); } };
+  return (
+    <div className="space-y-2">
+      <div className="text-sm font-semibold">HAKI stair tower</div>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="Target height (m)"><Input inputMode="decimal" value={f.target_m} onChange={(e) => setF({ ...f, target_m: Number(e.target.value) })} /></Field>
+        <Field label="Lift height"><Select value={f.lift_m} onChange={(e) => setF({ ...f, lift_m: Number(e.target.value) })}><option value={1}>1 m</option><option value={1.5}>1.5 m</option><option value={2}>2 m</option></Select></Field>
+        <Field label="Against the scaffold"><Select value={f.orientation} onChange={(e) => setF({ ...f, orientation: e.target.value })}><option value="width_against">Width (1655 mm)</option><option value="length_against">Length (3050 mm)</option></Select></Field>
+      </div>
+      <div className="flex gap-2"><Button size="sm" variant="secondary" onClick={run}>Calculate</Button><Button size="sm" onClick={save}>Save to scaffold</Button></div>
+      {r && <HakiResult r={r} />}
+    </div>
+  );
+}
+

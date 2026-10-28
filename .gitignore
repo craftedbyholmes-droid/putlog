@@ -1,0 +1,16 @@
+# never commit real firm documents, keys or local env
+fixtures/private/
+.env
+.env.*
+!.env.example
+__pycache__/
+.pytest_cache/
+.venv/
+node_modules/
+.next/
+supabase/.branches/
+supabase/.temp/
+.storage/
+web/.env.local
+api/.env
+*.tsbuildinfo

@@ -8,6 +8,9 @@ from .db import one, all_
 from .fields import APPROVED, INSPECTION_CHECKLIST
 
 RAMS_KINDS = ("method_statement", "risk_assessment")
+DRAWING_TO_FOLLOW = "To follow"
+SHEET_STANDARD = {"tg20_21": "NASC TG20:21", "tg30": "NASC TG30", "bespoke_design": "Bespoke design"}
+EXPECTED_STANDARD = {"tube_fitting": "NASC TG20:21", "haki_stair_tower": "NASC TG30"}   # until a sheet is recorded
 
 def d(x):
     if x is None: return ""
@@ -60,7 +63,10 @@ def scaffold_ctx(cur, m, scaffold_id):
     put_up = one(cur, """select o.start_date, o.end_date, (select count(distinct staff_id) from operation_crew c where c.operation_id = o.id) as crew
                          from operations o where o.scaffold_id = %s and o.type = 'put_up' order by o.start_date nulls last limit 1""", scaffold_id)
     quote = one(cur, "select number from quotes where job_id = %s order by number desc limit 1", s["job_id"])
-    standard = {"tg20_21": "NASC TG20:21", "tg30": "NASC TG30", "bespoke_design": "Bespoke design"}.get(sheet["type"]) if sheet else ""
+    # Until a drawing ref is recorded the RAMS says "To follow" and names the standard the scaffold type implies.
+    # Rule 2 is unaffected: it still needs a recorded sheet or bespoke design before scheduling or erection.
+    standard = SHEET_STANDARD.get(sheet["type"]) if sheet else EXPECTED_STANDARD.get(s["kind"], "")
+    drawing = (sheet["sheet_reference"] or sheet["drawing_ref"] or sheet["reference"]) if sheet else DRAWING_TO_FOLLOW
     start = (put_up["start_date"] if put_up and put_up["start_date"] else None) or s["planned_start_date"]
     days = (put_up["end_date"] - put_up["start_date"]).days + 1 if put_up and put_up["start_date"] and put_up["end_date"] else s["planned_days"]
     # the crew on the board once the put-up is scheduled; before that, the planned crew size (rule 2 blocks the board)
@@ -70,7 +76,7 @@ def scaffold_ctx(cur, m, scaffold_id):
            "client_name": client, "client_address": s["client_address"] or "",
            "site_address": s["site_address"] + (f", {s['site_postcode']}" if s["site_postcode"] else ""),
            "work_area": s["name"], "scaffold_ref": s["name"], "quote_reference": quote["number"] if quote else s["reference"],
-           "item_no": s["item_no"], "design_no": (sheet["sheet_reference"] or sheet["drawing_ref"] or sheet["reference"]) if sheet else "",
+           "item_no": s["item_no"], "design_no": drawing,
            "compliance_standard": standard, "date": d(dt.date.today()),
            "date_of_erection": d(start), "start_date": d(start),
            "duration": f"{days} day{'s' if days != 1 else ''}" if days else "",

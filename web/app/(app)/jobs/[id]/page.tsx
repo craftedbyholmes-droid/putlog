@@ -41,6 +41,8 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
 
   return (
     <div className="space-y-4">
+      {/* Messages pop up in the corner, so a result is seen wherever the page is scrolled to. */}
+      <div className="fixed inset-x-4 bottom-4 z-40 shadow-lg sm:left-auto sm:w-[28rem]"><Notice msg={msg} onClose={() => setMsg(null)} /></div>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div><h1 className="text-2xl font-semibold">{job.reference} · {job.clients?.company_name || job.clients?.name}</h1><p className="text-sm text-slate-500">{job.scope || "No scope entered"}</p></div>
         <div className="flex items-center gap-2"><Badge tone="blue">{job.status}</Badge>
@@ -49,7 +51,6 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
             {["invoiced", "paid", "closed"].includes(job.status) && <option value={job.status}>{job.status}</option>}
           </Select></div>
       </div>
-      <Notice msg={msg} onClose={() => setMsg(null)} />
 
       <Card><CardHeader title="Job details" />
         <div className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -188,10 +189,13 @@ function ScaffoldPanel({ s, docs, isOwner, companyId, onMsg, reload }: any) {
   const act = async (fn: () => Promise<any>, ok: (r: any) => string) => { setBusy(true); try { const r = await fn(); onMsg({ ok: true, text: ok(r) }); reload(); } catch (e: any) { onMsg({ ok: false, text: e.message }); } setBusy(false); };
   const rams = docs.filter((d: any) => d.type === "rams").sort((a: any, b: any) => b.revision_no - a.revision_no)[0];
   const draft = rams && !rams.issued_at ? rams : null;
-  const sheet = docs.find((d: any) => ["tg20_21", "tg30", "bespoke_design"].includes(d.type));
+  const sheet = docs.filter((d: any) => ["tg20_21", "tg30", "bespoke_design"].includes(d.type)).sort((a: any, b: any) => (a.created_at < b.created_at ? 1 : -1))[0];
+  // the latest issued RAMS went out before the drawing ref existed, so it says "To follow"
+  const issuedBeforeSheet = rams?.issued_at && sheet && new Date(sheet.created_at) > new Date(rams.issued_at);
   const pendingHandover = docs.find((d: any) => d.type === "handover" && (Array.isArray(d.handovers) ? d.handovers[0] : d.handovers)?.signature_status === "pending");
   const tower = s.kind === "haki_stair_tower";
   const fixed = s.pricing_mode === "fixed";
+  const sheetName = (t: string) => (t === "bespoke_design" ? "bespoke design" : t === "tg30" ? "TG30 sheet" : "TG20:21 sheet");
   const keptText = (r: any) => (r?.kept?.length ? `. Your edited ${r.kept.map((k: string) => DOC_NAMES[k].toLowerCase()).join(" and ")} kept as you wrote it.` : ".");
   const refreshDraft = (lead: string) => act(() => api(`/scaffolds/${s.id}/rams`, { method: "POST" }), (r) => `${lead} The draft RAMS has been updated${keptText(r)}`);
   const afterEdit = () => {
@@ -207,18 +211,20 @@ function ScaffoldPanel({ s, docs, isOwner, companyId, onMsg, reload }: any) {
     <div className="rounded-lg border">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-slate-50 px-3 py-2">
         <div className="flex flex-wrap items-center gap-2"><span className="font-semibold">{s.name}</span><Badge tone={STATUS_TONE[s.status]}>{s.status.replace("_", " ")}</Badge><Badge tone={tower ? "violet" : "slate"}>{tower ? "HAKI tower" : "Tube & fitting"}</Badge>{fixed && <Badge tone="amber">Fixed price</Badge>}{pendingHandover && <Badge tone="red">Handover unsigned</Badge>}</div>
-        <div className="flex items-center gap-2 text-xs text-slate-500"><span>{tower ? "" : `Bottom lift ${s.first_lift_m} m (${ftIn(Number(s.first_lift_m) * 1000)})`}{s.planned_start_date ? ` · planned ${ukDate(s.planned_start_date)}` : " · no planned start"}{s.planned_crew ? ` · crew ${s.planned_crew}` : ""}</span><Button size="sm" variant="ghost" onClick={() => setModal("edit")}>Edit</Button></div>
+        <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500"><span>{tower ? "" : `Bottom lift ${s.first_lift_m} m (${ftIn(Number(s.first_lift_m) * 1000)})`}{s.planned_start_date ? ` · planned ${ukDate(s.planned_start_date)}` : " · no planned start"}{s.planned_crew ? ` · crew ${s.planned_crew}` : ""}</span><Button size="sm" variant="secondary" onClick={() => setModal("edit")}>Edit details</Button></div>
       </div>
       <div className="grid gap-4 p-3 lg:grid-cols-2">
         <div className="space-y-4">{fixed && <FixedPrice s={s} onMsg={onMsg} reload={reload} />}{tower ? <HakiPanel s={s} onMsg={onMsg} reload={reload} /> : <Elevations s={s} companyId={companyId} reload={reload} />}</div>
         <div className="space-y-3">
           <div className="text-sm font-semibold">Compliance</div>
           <ol className="space-y-2 text-sm">
-            <Step done={!!sheet} label={sheet ? `${sheet.type === "bespoke_design" ? "Bespoke design" : sheet.type === "tg30" ? "TG30 sheet" : "TG20:21 sheet"} ${sheet.reference ?? ""}` : "Compliance sheet or bespoke design"} action={!sheet && <Button size="sm" variant="secondary" onClick={() => setModal("sheet")}>Record</Button>} />
+            <Step done={!!sheet} label={sheet ? `Drawing ref ${sheet.reference ?? ""} (${sheetName(sheet.type)})` : "Drawing ref (compliance sheet or bespoke design)"} action={!sheet && <Button size="sm" variant="secondary" onClick={() => setModal("sheet")}>Record</Button>} />
+            {!sheet && <li className="ml-6 text-xs text-slate-500">Not recorded yet: the RAMS says "To follow", and the scaffold can't be scheduled or erected until it is recorded.</li>}
             <Step done={!!rams} label={rams ? `RAMS pack revision ${rams.revision_no}${rams.issued_at ? `, issued ${ukDate(rams.issued_at)}` : " (draft)"}` : "RAMS pack"} action={
               <div className="flex gap-1"><Button size="sm" variant="secondary" disabled={busy} onClick={() => act(() => api(`/scaffolds/${s.id}/rams`, { method: "POST" }), (r) => `RAMS revision ${r.revision} ${draft ? "updated" : "generated"}${keptText(r)}` + (r.missing.length ? ` Fill before issue: ${r.missing.join(", ")}.` : " Ready to issue."))}>{rams ? (rams.issued_at ? "New revision" : "Regenerate") : "Generate"}</Button>
                 {draft && <Button size="sm" disabled={busy || draft.missing_fields?.length > 0} onClick={() => act(() => api(`/scaffolds/${s.id}/rams/issue`, { method: "POST" }), () => "RAMS issued. It can no longer be changed; changes need a new revision.")}>Issue</Button>}</div>} />
-            {draft?.missing_fields?.length > 0 && <li className="ml-6 text-xs text-amber-700">Empty before issue: {draft.missing_fields.join(", ")}. Most come from Edit (planned start, crew) and the compliance sheet.</li>}
+            {issuedBeforeSheet && <li className="ml-6 text-xs text-amber-700">This RAMS was issued before the drawing ref was recorded, so it says "To follow". Click New revision to issue one that cites {sheet.reference}.</li>}
+            {draft?.missing_fields?.length > 0 && <li className="ml-6 text-xs text-amber-700">Empty before issue: {draft.missing_fields.join(", ")}. Most come from Edit details (planned start, crew) and the job details above.</li>}
             {draft && <li className="ml-6 text-xs text-slate-500">Site-specific methods: download the Word file below, edit it, then Upload edited. Regenerate keeps any part you edited.</li>}
             <Step done={["on_hire", "dismantle_requested", "dismantling", "dismantled"].includes(s.status)} label={s.erected_at ? `Erected ${ukDate(s.erected_at)}` : "Confirm erected"} action={!s.erected_at && <Button size="sm" onClick={() => setModal("erect")}>Confirm erected</Button>} />
             {pendingHandover && <li className="ml-6 flex flex-wrap items-center gap-2 text-xs text-red-700">Handover {pendingHandover.reference} is not signed.{isOwner && <Button size="sm" variant="secondary" onClick={() => setModal("signed")}>Record client confirmation</Button>}</li>}

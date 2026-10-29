@@ -35,6 +35,12 @@ These amend "Scaffolding CRM — Agreed Spec & Build Handoff". Fold them into th
   first brings the standard parts up to date, then checks the job and scaffold records have every required detail
   (even where the details were typed into an edited part), then locks the pack. After issue, any change is a new
   revision (rule 7). An edited part is a filled-in document, not a template: dates in it are changed by hand.
+- **Drawing ref "To follow" (29 Oct 2026).** The compliance sheet's reference is labelled "Drawing ref" and is never
+  prefilled: whatever is recorded there counts as the scaffold's sheet for rule 2, so a placeholder would let a scaffold
+  go up with no design. Until a drawing ref is recorded, the RAMS prints "To follow" as the drawing ref and the standard
+  the scaffold type implies (NASC TG20:21 for tube and fitting, NASC TG30 for HAKI towers), and the RAMS can be issued.
+  Rule 2 is unchanged: scheduling and erection stay blocked until a real drawing ref is recorded. A RAMS issued before
+  the drawing ref was recorded is flagged on the scaffold for a new revision that cites it.
 - **RAMS produced before work starts;** the rule 2 gate is unchanged.
 - **RAMS layout:** logo top right then the document name, in a real page header on every page. All templates name the
   logo picture `logo`.
@@ -51,6 +57,8 @@ These amend "Scaffolding CRM — Agreed Spec & Build Handoff". Fold them into th
 - **Edited RAMS uploads have their own check.** Word turns typed email addresses into links by itself, so web and email
   links are allowed in an edited draft; macros, links to outside files and leftover template tags are refused. Uploaded
   templates keep the stricter rule (no outside links at all).
+- **Errors show where the user is looking.** Form errors appear inside the form; page messages pop up in the bottom
+  corner, so a failed action is never hidden behind an open form or off the top of the page.
 - **CSV export:** one row per line item; VAT is worked on the subtotal and spread across lines so the CSV adds up
   exactly to the PDF.
 - **Numbering is per firm** (JOB0001, Q0001, HC0001, IR0001), so firms can't infer each other's volumes.

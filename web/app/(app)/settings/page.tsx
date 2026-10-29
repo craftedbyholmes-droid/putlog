@@ -10,6 +10,7 @@ type Msg = { ok: boolean; text: string } | null;
 export default function Settings() {
   const [c, setC] = useState<any>(null); const [role, setRole] = useState(""); const [rates, setRates] = useState<any[]>([]);
   const [staff, setStaff] = useState<any[]>([]); const [vans, setVans] = useState<any[]>([]); const [msg, setMsg] = useState<Msg>(null);
+  const [signingVersion, setSigningVersion] = useState(0);   // bumps when you save your signature or PIN, so the people list refreshes
   const load = async () => {
     const sb = supabase(); const { data: u } = await sb.auth.getUser();
     const { data: me } = await sb.from("profiles").select("role, company_id, companies(*)").eq("id", u.user!.id).single();
@@ -52,8 +53,8 @@ export default function Settings() {
         </fieldset>
         <div className="flex flex-wrap items-center gap-3 border-t p-4 text-sm"><span className="font-medium">Logo</span>{c.logo_path ? <Badge tone="green">Uploaded</Badge> : <Badge tone="red">Missing: documents can't be issued without it</Badge>}{owner && <input type="file" accept="image/*" onChange={(e) => e.target.files?.[0] && logo(e.target.files[0])} className="text-sm" />}</div>
       </Card>
-      <MySignature onMsg={setMsg} />
-      {owner && <SigningPeople companyId={c.id} onMsg={setMsg} />}
+      <MySignature onMsg={setMsg} onSaved={() => setSigningVersion((v) => v + 1)} />
+      {owner && <SigningPeople companyId={c.id} onMsg={setMsg} refresh={signingVersion} />}
       <Card><CardHeader title="Rates (used to build quotes)" />
         <div className="grid gap-3 p-4 sm:grid-cols-3">
           {[["squareage", "tube_fitting", "Tube & fitting, £ per m²"], ["meterage", "tube_fitting", "Tube & fitting, £ per metre run"], ["height", "haki_stair_tower", "HAKI tower, £ per vertical metre"]].map(([u, k, l]) => (
@@ -98,21 +99,21 @@ function SignaturePad({ busy, onSave }: { busy: boolean; onSave: (b: Blob) => vo
   );
 }
 
-function MySignature({ onMsg }: { onMsg: (m: Msg) => void }) {
+function MySignature({ onMsg, onSaved }: { onMsg: (m: Msg) => void; onSaved: () => void }) {
   const [st, setSt] = useState<any>(null); const [busy, setBusy] = useState(false);
   const [p, setP] = useState({ pin: "", again: "", current: "" });
   const load = () => api("/me/signing").then(setSt).catch((e) => onMsg({ ok: false, text: e.message }));
   useEffect(() => { load(); }, []);
   const upload = async (blob: Blob, name: string) => {
     setBusy(true); const fd = new FormData(); fd.append("file", blob, name);
-    try { await api("/me/signature", { method: "POST", body: fd }); onMsg({ ok: true, text: "Signature saved. It is only ever applied when you tap a Sign button yourself." }); load(); }
+    try { await api("/me/signature", { method: "POST", body: fd }); onMsg({ ok: true, text: "Signature saved. It is only ever applied when you tap a Sign button yourself." }); load(); onSaved(); }
     catch (e: any) { onMsg({ ok: false, text: e.message }); }
     setBusy(false);
   };
   const savePin = async () => {
     if (!/^\d{4,6}$/.test(p.pin)) return onMsg({ ok: false, text: "The PIN must be 4 to 6 digits." });
     if (p.pin !== p.again) return onMsg({ ok: false, text: "The two PINs don't match." });
-    try { await api("/me/signing-pin", { method: "POST", body: JSON.stringify({ pin: p.pin, current_pin: p.current || null }) }); setP({ pin: "", again: "", current: "" }); onMsg({ ok: true, text: "Signing PIN saved." }); load(); }
+    try { await api("/me/signing-pin", { method: "POST", body: JSON.stringify({ pin: p.pin, current_pin: p.current || null }) }); setP({ pin: "", again: "", current: "" }); onMsg({ ok: true, text: "Signing PIN saved." }); load(); onSaved(); }
     catch (e: any) { onMsg({ ok: false, text: e.message }); }
   };
   const digits = (k: "pin" | "again" | "current") => (e: React.ChangeEvent<HTMLInputElement>) => setP({ ...p, [k]: e.target.value.replace(/\D/g, "") });
@@ -140,10 +141,10 @@ function MySignature({ onMsg }: { onMsg: (m: Msg) => void }) {
   );
 }
 
-function SigningPeople({ companyId, onMsg }: { companyId: string; onMsg: (m: Msg) => void }) {
+function SigningPeople({ companyId, onMsg, refresh }: { companyId: string; onMsg: (m: Msg) => void; refresh: number }) {
   const [rows, setRows] = useState<any[]>([]);
   const load = async () => { const { data } = await supabase().from("profiles").select("id, full_name, position, role, can_sign_rams, is_competent_inspector, signature_path").eq("company_id", companyId).order("full_name"); setRows(data ?? []); };
-  useEffect(() => { load(); }, [companyId]);
+  useEffect(() => { load(); }, [companyId, refresh]);
   const upd = async (id: string, patch: any) => { const { error } = await supabase().from("profiles").update(patch).eq("id", id); if (error) onMsg({ ok: false, text: error.message }); else load(); };
   const reset = async (id: string, name: string) => {
     if (!confirm(`Reset ${name}'s signing PIN? They will need to set a new one before they can sign.`)) return;
@@ -152,7 +153,7 @@ function SigningPeople({ companyId, onMsg }: { companyId: string; onMsg: (m: Msg
   };
   return (
     <Card><CardHeader title="People who sign" />
-      <p className="px-4 pt-3 text-xs text-slate-500">The owner can always sign a RAMS. Tick who else can. Inspection reports can only be signed by someone marked as a competent inspector. Position prints beside each signature.</p>
+      <p className="px-4 pt-3 text-xs text-slate-500">The owner can always sign a RAMS. Tick who else can. Inspection reports can only be signed by someone marked as a competent inspector. Position prints beside each signature. Each person saves their own signature and PIN while signed in as themselves.</p>
       <div className="divide-y">{rows.map((r) => (
         <div key={r.id} className="grid items-center gap-2 p-3 text-sm sm:grid-cols-6">
           <span className="font-medium">{r.full_name}<span className="block text-xs font-normal capitalize text-slate-500">{r.role}</span></span>

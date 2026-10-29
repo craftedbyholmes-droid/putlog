@@ -1,6 +1,6 @@
 """End-to-end through the API against a real database: the RAMS → erect → handover → inspection flow,
 quotes, own templates and logo. Skipped when no database is reachable.
-Covers tests 4, 6, 7, 14, 15, 16, 19 and 21 through the app, and rule 2 as the user sees it."""
+Covers tests 4, 6, 7, 14, 15, 16, 19 and 21 through the app, rule 2 as the user sees it, and signing."""
 import os, io, tempfile, uuid, csv, pytest
 os.environ.setdefault("STORAGE_BACKEND", "local")
 os.environ.setdefault("STORAGE_DIR", tempfile.mkdtemp(prefix="putlog-store-"))
@@ -11,6 +11,8 @@ from app import config, documents as D
 from app.main import app
 from app.auth import current_user
 from app.fields import INSPECTION_CHECKLIST
+
+PIN = "2468"
 
 def db_up():
     try:
@@ -49,6 +51,15 @@ def logo_bytes():
     from PIL import Image
     b = io.BytesIO(); Image.new("RGB", (400, 120), (20, 60, 120)).save(b, "JPEG"); return b.getvalue()
 
+def sig_png():
+    from PIL import Image, ImageDraw
+    im = Image.new("RGB", (400, 120), "white"); ImageDraw.Draw(im).line((10, 100, 390, 20), fill="black", width=6)
+    b = io.BytesIO(); im.save(b, "PNG"); return b.getvalue()
+
+def ready_to_sign(api):
+    assert api.post("/me/signature", files={"file": ("sig.png", sig_png(), "image/png")}).status_code == 200
+    assert api.post("/me/signing-pin", json={"pin": PIN}).status_code == 200
+
 def test_quote_flow_vat_off_and_on():
     for vat, total in ((False, "378.00"), (True, "453.60")):
         ids = seed(vat); api = client_for(ids["owner"])
@@ -78,11 +89,19 @@ def test_full_scaffold_flow():
         assert "Acme & Co Builders" in text and "NASC TG20:21" in text and "{{" not in text
         assert ("TG-2026-0042" in text) == (kind == "method_statement")      # only the method statement carries the design number
         if D.soffice_path(): assert api.get("/files", params={"path": rams["files"][kind]["pdf"]}).content[:4] == b"%PDF"
-    assert api.post(f"/scaffolds/{sid}/rams/issue").json()["issued"]
-    # erect: handover created unsigned with the banner (test 21)
+    # sign and issue: needs a PIN, and the right one
+    assert api.post(f"/scaffolds/{sid}/rams/issue").status_code == 422
+    ready_to_sign(api)
+    assert api.post(f"/scaffolds/{sid}/rams/issue", json={"pin": "9999"}).status_code == 403
+    issued = api.post(f"/scaffolds/{sid}/rams/issue", json={"pin": PIN}).json()
+    assert issued["issued"] and issued["signed_by"] == "Keith", issued
+    for kind in ("method_statement", "risk_assessment"):
+        signed = D.text_of(api.get("/files", params={"path": issued["files"][kind]["docx"]}).content)
+        assert "Signed electronically" in signed and "Signed by Keith, Owner" in signed
+    # erect: handover created unsigned with the banner (test 21), issued and signed by the person confirming
     h = api.post(f"/scaffolds/{sid}/confirm-erected", json={"permitted_use": "Access and light duty", "max_loaded_platforms": "1 + 1 at 50%",
                  "inspecting_party": "us", "inspection_responsible_name": "Dan Price", "inspection_responsible_phone": "07700 900001"}).json()
-    assert h["certificate_ref"] == "HC0001" and h["missing"] == [], h
+    assert h["certificate_ref"] == "HC0001" and h["missing"] == [] and h["signed"], h
     unsigned = D.text_of(api.get("/files", params={"path": h["files"]["handover"]["docx"]}).content)
     assert D.BANNER in unsigned.upper() and "Class 2" in unsigned
     # only with a note of how the client confirmed
@@ -90,12 +109,14 @@ def test_full_scaffold_flow():
     s = api.post(f"/handovers/{h['doc_id']}/mark-signed", json={"name": "Jo Bloggs", "role": "Site manager", "company": "Acme",
                  "evidence_note": "Email from Jo Bloggs 02/11/2026 16:40", "channel": "email"}).json()
     signed = D.text_of(api.get("/files", params={"path": s["files"]["handover"]["docx"]}).content)
-    assert D.BANNER not in signed.upper() and "not a signature" in signed
-    # inspection report (test 22 through the app)
-    i = api.post(f"/scaffolds/{sid}/inspections", json={"inspection_type": "7-day", "inspected_at": "2026-11-09T08:30", "weather": "Dry",
-                 "outcome": "Safe to use", "tag_updated": True, "next_inspection_due": "2026-11-16", "copies_sent_to": "Office; client",
-                 "checklist": [{"item": x, "result": "yes"} for x in INSPECTION_CHECKLIST], "defects": []}).json()
-    assert i["report_ref"] == "IR0001" and i["missing"] == []
+    assert D.BANNER not in signed.upper() and "not a signature" in signed and "Keith" in signed
+    # inspection report (test 22 through the app), signed by the inspector with their PIN
+    form = {"inspection_type": "7-day", "inspected_at": "2026-11-09T08:30", "weather": "Dry",
+            "outcome": "Safe to use", "tag_updated": True, "next_inspection_due": "2026-11-16", "copies_sent_to": "Office; client",
+            "checklist": [{"item": x, "result": "yes"} for x in INSPECTION_CHECKLIST], "defects": []}
+    assert api.post(f"/scaffolds/{sid}/inspections", json=form).status_code == 422          # no PIN
+    i = api.post(f"/scaffolds/{sid}/inspections", json={**form, "pin": PIN}).json()
+    assert i["report_ref"] == "IR0001" and i["missing"] == [] and i["signed_by"] == "Keith", i
     rep = D.text_of(api.get("/files", params={"path": i["files"]["inspection"]["docx"]}).content)
     assert "2 Market Place, Aylsham" in rep and "no matter" in rep.lower()
 

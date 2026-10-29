@@ -2,11 +2,13 @@
 so row-level security decides what each query can see or change."""
 import datetime as dt, json, uuid
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 from fastapi import HTTPException
 from . import config, documents as D, quotes as Q, storage, template_checks as T, haki
 from .db import one, all_
 from .fields import APPROVED, INSPECTION_CHECKLIST
 
+UK = ZoneInfo("Europe/London")
 RAMS_KINDS = ("method_statement", "risk_assessment")
 DRAWING_TO_FOLLOW = "To follow"
 SHEET_STANDARD = {"tg20_21": "NASC TG20:21", "tg30": "NASC TG30", "bespoke_design": "Bespoke design"}
@@ -14,7 +16,9 @@ EXPECTED_STANDARD = {"tube_fitting": "NASC TG20:21", "haki_stair_tower": "NASC T
 
 def d(x):
     if x is None: return ""
-    if isinstance(x, dt.datetime): return x.strftime("%d/%m/%Y %H:%M")
+    if isinstance(x, dt.datetime):
+        if x.tzinfo: x = x.astimezone(UK)
+        return x.strftime("%d/%m/%Y %H:%M")
     if isinstance(x, dt.date): return x.strftime("%d/%m/%Y")
     return str(x)
 
@@ -46,6 +50,66 @@ def store_doc(m, scaffold_id, name, docx):
     pdf = D.to_pdf(docx)
     if pdf: storage.put("documents", base + ".pdf", pdf, "application/pdf")
     return {"docx": base + ".docx", "pdf": base + ".pdf" if pdf else None}
+
+# ---------- saved signatures and signing PINs ----------
+def _signer_row(cur):
+    return one(cur, """select full_name, position, role, can_sign_rams, is_competent_inspector, signature_path, signature_updated_at
+                         from profiles where id = auth.uid()""")
+
+def _own_signature(m, path) -> bool:
+    return bool(path) and path.startswith(f"{m['company_id']}/{m['id']}/")
+
+def signer(cur, m, *, need_rams=False, need_inspector=False, with_pin=False):
+    """The signed-in person's saved signature, for a signature they are applying themselves right now.
+    The PIN (where needed) is checked before this, in its own transaction, so wrong tries are always counted."""
+    p = _signer_row(cur)
+    if need_rams and not (p["role"] == "owner" or p["can_sign_rams"]):
+        raise HTTPException(403, "You are not on the list of people who can sign a RAMS. The owner can add you in Settings, under People who sign.")
+    if need_inspector and not p["is_competent_inspector"]:
+        raise HTTPException(403, "Only someone marked as a competent inspector can sign an inspection report. The owner sets this in Settings, under People who sign.")
+    if not p["signature_path"]:
+        raise HTTPException(409, "Save your signature in Settings, under My signature, first.")
+    if not _own_signature(m, p["signature_path"]):
+        raise HTTPException(409, "The signature on your login isn't one you saved yourself. Save it again in Settings, under My signature.")
+    now = dt.datetime.now(UK)
+    who = p["full_name"] + (f", {p['position']}" if p["position"] else "")
+    how = ("Applied by the signer's own deliberate action and confirmed with their signing PIN." if with_pin
+           else "Applied by the signer's own deliberate action.")
+    return {"png": storage.get("signatures", p["signature_path"]), "path": p["signature_path"], "name": p["full_name"],
+            "position": p["position"] or "", "iso": now.isoformat(timespec="seconds"), "display": now.strftime("%d/%m/%Y %H:%M"),
+            "lines": [f"Signed by {who}", f"on {now.strftime('%d/%m/%Y')} at {now.strftime('%H:%M')} (UK time).", how]}
+
+def optional_signer(cur, m):
+    """For one-tap signatures (issuing a handover): the person's own saved signature, or None if they have none yet."""
+    p = _signer_row(cur)
+    return {"path": p["signature_path"], "name": p["full_name"]} if _own_signature(m, p["signature_path"]) else None
+
+def signing_status(cur):
+    m = me(cur); p = _signer_row(cur)
+    return {"name": p["full_name"], "position": p["position"] or "", "has_signature": _own_signature(m, p["signature_path"]),
+            "signature_updated_at": p["signature_updated_at"].isoformat() if p["signature_updated_at"] else None,
+            "has_pin": one(cur, "select private.has_signing_pin() as v")["v"],
+            "can_sign_rams": p["role"] == "owner" or p["can_sign_rams"], "is_inspector": p["is_competent_inspector"]}
+
+def save_signature(cur, data):
+    m = me(cur)
+    png = D.clean_signature(data)
+    path = f"{m['company_id']}/{m['id']}/signature-{uuid.uuid4().hex[:8]}.png"
+    storage.put("signatures", path, png, "image/png")
+    cur.execute("select private.set_my_signature(%s::text)", (path,))
+    return {"saved": True}
+
+def set_signing_pin(cur, pin, current):
+    return one(cur, "select private.set_signing_pin(%s::text, %s::text) as s", pin, current)["s"]
+
+def check_pin(cur, pin):
+    return one(cur, "select private.check_signing_pin(%s::text) as s", pin)["s"]
+
+def reset_signing_pin(cur, profile_id):
+    m = me(cur)
+    if m["role"] != "owner": raise HTTPException(403, "Only the owner can reset a signing PIN.")
+    cur.execute("select private.clear_signing_pin(%s::uuid)", (profile_id,))
+    return {"reset": True}
 
 # ---------- context for a scaffold's documents ----------
 def scaffold_ctx(cur, m, scaffold_id):
@@ -101,10 +165,11 @@ def rams_missing(ctx, has_logo: bool) -> list[str]:
         missing.update(D.missing_required(kind, ctx, logo_present=has_logo))
     return sorted(missing)
 
-def generate_rams(cur, scaffold_id, discard: str | None = None):
+def generate_rams(cur, scaffold_id, discard: str | None = None, sign: dict | None = None):
     """Builds or refreshes the draft RAMS pack. On an existing draft, a part edited by hand is kept as written unless
-    that part is being discarded; every other part is filled fresh from the firm's template. An issued pack is never
-    touched: generating after issue starts the next revision."""
+    that part is being discarded; every other part is filled fresh from the firm's template. With `sign`, every part
+    gets the signer's signature and a dated signature block. An issued pack is never touched: generating after issue
+    starts the next revision."""
     if discard is not None and discard not in RAMS_KINDS: raise HTTPException(422, "Unknown document.")
     m = me(cur); s, ctx = scaffold_ctx(cur, m, scaffold_id); logo = logo_png(m)
     current = one(cur, "select * from compliance_docs where scaffold_id = %s and type = 'rams' order by revision_no desc limit 1", scaffold_id)
@@ -112,13 +177,24 @@ def generate_rams(cur, scaffold_id, discard: str | None = None):
     rev = 0 if not current else (current["revision_no"] + 1 if current["issued_at"] else current["revision_no"])
     old_files = (draft["files"] or {}) if draft else {}
     files, used, kept = {}, [], []
+    signed = {"signed_by": sign["name"], "signed_at": sign["iso"]} if sign else {}
     for kind in RAMS_KINDS:
         prev = old_files.get(kind) or {}
         if prev.get("edited_by") and kind != discard:
-            files[kind] = prev; kept.append(kind); continue
+            kept.append(kind)
+            if sign:   # the edited part's own signature box is gone, so the signature goes in the block at the end
+                out = D.add_signature_block(storage.get("documents", prev["docx"]), sign["png"], sign["lines"])
+                files[kind] = {**prev, **store_doc(m, scaffold_id, f"rams-r{rev}-{kind}-edited-signed-{uuid.uuid4().hex[:6]}", out), **signed}
+            else:
+                files[kind] = prev
+            continue
         trow, tbytes = template(cur, m, kind)
-        out = D.render(tbytes, ctx, logo)
-        files[kind] = store_doc(m, scaffold_id, f"rams-r{rev}-{kind}", out)
+        out = D.render(tbytes, ctx, logo, images={"prepared_by_signature": sign["png"]} if sign else None)
+        if sign:
+            out = D.add_signature_block(out, None, sign["lines"])
+            files[kind] = {**store_doc(m, scaffold_id, f"rams-r{rev}-{kind}-signed", out), **signed}
+        else:
+            files[kind] = store_doc(m, scaffold_id, f"rams-r{rev}-{kind}", out)
         used.append({"kind": kind, "template_id": str(trow["id"]), "version": trow["version"]})
     missing = rams_missing(ctx, bool(logo))
     if draft:
@@ -163,16 +239,20 @@ def upload_rams_edit(cur, scaffold_id, kind, filename, data):
     return {"doc_id": str(draft["id"]), "kind": kind, "files": files, "missing": missing}
 
 def issue_rams(cur, scaffold_id):
-    """Brings the standard parts up to date with the current job and scaffold details (edited parts are kept as
-    written), checks nothing is missing, then locks the pack."""
+    """Sign and issue. The signer's PIN has already been checked. Brings the standard parts up to date with the current
+    job and scaffold details, signs every part, then locks the pack."""
+    m = me(cur)
+    sig = signer(cur, m, need_rams=True, with_pin=True)
     doc = one(cur, """select * from compliance_docs where scaffold_id = %s and type = 'rams' and issued_at is null
                       order by revision_no desc limit 1""", scaffold_id)
     if not doc: raise HTTPException(409, "Generate the RAMS pack first.")
-    g = generate_rams(cur, scaffold_id)
-    if g["missing"]:
-        raise HTTPException(409, "Fill these before issuing: " + ", ".join(g["missing"]))
+    s, ctx = scaffold_ctx(cur, m, scaffold_id)
+    missing = rams_missing(ctx, bool(m["logo_path"]))
+    if missing:
+        raise HTTPException(409, "Fill these before signing: " + ", ".join(missing))
+    g = generate_rams(cur, scaffold_id, sign=sig)
     cur.execute("update compliance_docs set issued_at = now(), issued_by = auth.uid() where id = %s", (doc["id"],))
-    return {"doc_id": str(doc["id"]), "issued": True, "kept": g["kept"]}
+    return {"doc_id": str(doc["id"]), "issued": True, "kept": g["kept"], "files": g["files"], "signed_by": sig["name"]}
 
 def record_sheet(cur, scaffold_id, body):
     m = me(cur)
@@ -200,14 +280,17 @@ PARTY_TEXT = {"us": "Us (the scaffold contractor)", "customer": "The customer", 
 def handover_ctx(cur, m, doc_id):
     h = one(cur, "select h.*, d.scaffold_id, d.created_at from handovers h join compliance_docs d on d.id = h.doc_id where h.doc_id = %s", doc_id)
     s, ctx = scaffold_ctx(cur, m, h["scaffold_id"])
-    issuer = one(cur, "select full_name, position from profiles where id = auth.uid()")
+    # the person who issued it, recorded at the time, so a later re-render never names whoever is signed in now
+    issuer_id = h.get("issued_by_profile_id")
+    issuer = one(cur, "select full_name, position from profiles where id = %s", issuer_id) if issuer_id else \
+             one(cur, "select full_name, position from profiles where id = auth.uid()")
     ctx.update({k: d(h[k]) for k in ("certificate_ref", "loading_class", "permitted_use", "max_loaded_platforms", "restrictions",
                                       "max_leg_load_kn", "add_ons_permitted", "inspection_responsible_name",
                                       "inspection_responsible_phone", "next_inspection_due", "confirmed_by_name",
                                       "confirmed_by_role", "confirmed_by_company", "confirmed_at", "signed_ip")})
     ctx.update({"inspecting_party": PARTY_TEXT.get(h["inspecting_party"], ""), "handover_date": d(s["erected_at"] or dt.date.today()),
                 "issued_by_name": issuer["full_name"], "issued_by_position": issuer["position"] or "", "issued_by_signature": "",
-                "issued_at": d(h["created_at"]), "confirmed_by_signature": "",
+                "issued_at": d(h.get("issued_signed_at") or h["created_at"]), "confirmed_by_signature": "",
                 "acceptance_method_text": {"manual_override": f"Confirmed by {h['override_channel'] or 'message'}; recorded by the firm (not a signature)",
                                            "digital_signature": "Signed digitally"}.get(h["acceptance_method"], ""),
                 "signature_pending": h["signature_status"] == "pending"})
@@ -216,7 +299,8 @@ def handover_ctx(cur, m, doc_id):
 def render_handover(cur, m, doc_id):
     h, ctx = handover_ctx(cur, m, doc_id)
     trow, tbytes = template(cur, m, "handover")
-    out = D.render(tbytes, ctx, logo_png(m))
+    sig_png = storage.get("signatures", h["issued_signature_path"]) if h.get("issued_signature_path") else None
+    out = D.render(tbytes, ctx, logo_png(m), images={"issued_by_signature": sig_png} if sig_png else None)
     if trow["source"] == "uploaded" and ctx["signature_pending"]:
         out = D.add_banner(out)
     suffix = "signed" if not ctx["signature_pending"] else "unsigned"
@@ -228,6 +312,7 @@ def confirm_erected(cur, scaffold_id, body):
     m = me(cur)
     cur.execute("update scaffolds set status = 'on_hire', erected_at = now() where id = %s", (scaffold_id,))   # rule 2 trigger guards this
     s, ctx = scaffold_ctx(cur, m, scaffold_id)
+    sig = optional_signer(cur, m)     # one tap: the confirm is already logged against this person and time
     n = one(cur, "select private.next_number(%s, 'certificate') as n", m["company_id"])["n"]
     ref = f"HC{n:04d}"
     doc_id = one(cur, "insert into compliance_docs (company_id, scaffold_id, type, reference) values (%s,%s,'handover',%s) returning id",
@@ -238,13 +323,15 @@ def confirm_erected(cur, scaffold_id, body):
               "add_ons_permitted": body.get("add_ons_permitted") or ctx["add_ons_permitted"],
               "inspecting_party": body.get("inspecting_party"), "inspection_responsible_name": body.get("inspection_responsible_name"),
               "inspection_responsible_phone": body.get("inspection_responsible_phone"),
-              "next_inspection_due": body.get("next_inspection_due") or (dt.date.today() + dt.timedelta(days=7))}
+              "next_inspection_due": body.get("next_inspection_due") or (dt.date.today() + dt.timedelta(days=7)),
+              "issued_by_profile_id": m["id"], "issued_signature_path": sig["path"] if sig else None,
+              "issued_signed_at": dt.datetime.now(dt.timezone.utc) if sig else None}
     cur.execute(f"insert into handovers (doc_id, company_id, certificate_ref, {', '.join(fields)}) values (%s,%s,%s{', %s' * len(fields)})",
                 (doc_id, m["company_id"], ref, *fields.values()))
     files, missing, trow = render_handover(cur, m, doc_id)
     cur.execute("update compliance_docs set files = %s, missing_fields = %s, docx_path = %s, pdf_path = %s, template_id = %s, template_version = %s where id = %s",
                 (json.dumps(files), missing, files["handover"]["docx"], files["handover"]["pdf"], trow["id"], trow["version"], doc_id))
-    return {"doc_id": str(doc_id), "certificate_ref": ref, "files": files, "missing": missing, "signature_pending": True}
+    return {"doc_id": str(doc_id), "certificate_ref": ref, "files": files, "missing": missing, "signature_pending": True, "signed": bool(sig)}
 
 def mark_signed(cur, doc_id, body):
     m = me(cur)
@@ -261,22 +348,26 @@ def mark_signed(cur, doc_id, body):
                 (json.dumps(files), files["handover"]["docx"], files["handover"]["pdf"], doc_id))
     return {"doc_id": str(doc_id), "files": files, "signature_pending": False}
 
-# ---------- inspection report (simple form, no scheduling or signing yet) ----------
+# ---------- inspection report: signed by the inspector who did it (rule 8) ----------
 def create_inspection(cur, scaffold_id, body):
-    m = me(cur); s, ctx = scaffold_ctx(cur, m, scaffold_id)
+    """The inspector's PIN has already been checked. The report carries their saved signature, is issued at once and
+    can't change afterwards; a correction is a new report. Missing details are listed before anything is signed."""
+    m = me(cur)
+    sig = signer(cur, m, need_inspector=True, with_pin=True)
+    s, ctx = scaffold_ctx(cur, m, scaffold_id)
     n = one(cur, "select private.next_number(%s, 'report') as n", m["company_id"])["n"]; ref = f"IR{n:04d}"
-    inspector = one(cur, "select full_name, position, inspector_qualification from profiles where id = %s",
-                    body.get("inspector_profile_id") or m["id"])
+    inspector = one(cur, "select full_name, position, inspector_qualification from profiles where id = %s", m["id"])
     prev = one(cur, "select max(inspected_at) as at from inspections i join compliance_docs d on d.id = i.doc_id where d.scaffold_id = %s", scaffold_id)
     doc_id = one(cur, "insert into compliance_docs (company_id, scaffold_id, type, reference) values (%s,%s,'inspection',%s) returning id",
                  m["company_id"], scaffold_id, ref)["id"]
     inspected_at = body.get("inspected_at") or dt.datetime.now().isoformat(timespec="minutes")
     cur.execute("""insert into inspections (doc_id, company_id, report_ref, inspection_type, inspected_at, weather, outcome,
-                   tag_updated, next_inspection_due, copies_sent_to, inspector_profile_id, server_received_at)
-                   values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now())""",
+                   tag_updated, next_inspection_due, copies_sent_to, inspector_profile_id, server_received_at,
+                   inspector_signature_path, signed_at, device_signed_at)
+                   values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now(), %s, now(), %s)""",
                 (doc_id, m["company_id"], ref, body.get("inspection_type", "7-day"), inspected_at, body.get("weather"),
                  body.get("outcome"), body.get("tag_updated"), body.get("next_inspection_due"), body.get("copies_sent_to"),
-                 body.get("inspector_profile_id") or m["id"]))
+                 m["id"], sig["path"], body.get("device_signed_at") or None))
     results = {c["item"]: c for c in body.get("checklist", [])}
     checklist = [{"item": i, "result": (results.get(i) or {}).get("result", ""), "comment": (results.get(i) or {}).get("comment", "")}
                  for i in INSPECTION_CHECKLIST]
@@ -293,18 +384,21 @@ def create_inspection(cur, scaffold_id, body):
                 "weather": body.get("weather", ""), "outcome": body.get("outcome", ""),
                 "tag_updated": {True: "Yes", False: "No"}.get(body.get("tag_updated"), ""),
                 "next_inspection_due": d(dt.date.fromisoformat(body["next_inspection_due"])) if body.get("next_inspection_due") else "",
-                "copies_sent_to": body.get("copies_sent_to", ""), "signed_at": "",
+                "copies_sent_to": body.get("copies_sent_to", ""), "signed_at": sig["display"],
                 "inspector_name": inspector["full_name"], "inspector_position": inspector["position"] or "",
                 "inspector_qualification": inspector["inspector_qualification"] or "", "inspector_signature": "",
                 "checklist": [{**c, "result": {"yes": "Yes", "no": "No", "n/a": "N/A"}.get(c["result"], c["result"])} for c in checklist],
                 "defects": [{**x, "due_date": x.get("due_date", "")} for x in defects]})
-    trow, tbytes = template(cur, m, "inspection")
-    out = D.render(tbytes, ctx, logo_png(m))
-    files = {"inspection": store_doc(m, scaffold_id, f"inspection-{ref}", out)}
     missing = D.missing_required("inspection", ctx, logo_present=bool(m["logo_path"]))
-    cur.execute("update compliance_docs set files = %s, missing_fields = %s, docx_path = %s, pdf_path = %s, template_id = %s, template_version = %s where id = %s",
-                (json.dumps(files), missing, files["inspection"]["docx"], files["inspection"]["pdf"], trow["id"], trow["version"], doc_id))
-    return {"doc_id": str(doc_id), "report_ref": ref, "files": files, "missing": missing}
+    if missing:
+        raise HTTPException(422, "Fill these before signing: " + "; ".join(missing))
+    trow, tbytes = template(cur, m, "inspection")
+    out = D.render(tbytes, ctx, logo_png(m), images={"inspector_signature": sig["png"]})
+    files = {"inspection": store_doc(m, scaffold_id, f"inspection-{ref}", out)}
+    cur.execute("""update compliance_docs set files = %s, missing_fields = %s, docx_path = %s, pdf_path = %s, template_id = %s,
+                   template_version = %s, issued_at = now(), issued_by = auth.uid() where id = %s""",
+                (json.dumps(files), [], files["inspection"]["docx"], files["inspection"]["pdf"], trow["id"], trow["version"], doc_id))
+    return {"doc_id": str(doc_id), "report_ref": ref, "files": files, "missing": [], "signed_by": sig["name"]}
 
 # ---------- quotes ----------
 def build_quote(cur, job_id):

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import { api, download } from "@/lib/api";
 import { Badge, Button, Card, CardHeader, Empty, Field, Input, Modal, Notice, Select } from "@/components/ui";
-import { ConfirmErectedModal, InspectionModal, SheetModal } from "@/components/scaffold/actions";
+import { ConfirmErectedModal, InspectionModal, SheetModal, SignModal } from "@/components/scaffold/actions";
 import { cn, ftIn, gbp, ukDate } from "@/lib/utils";
 import { HakiResult } from "@/components/HakiResult";
 
@@ -59,7 +59,7 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
           <Field label="Emergency phone"><Input defaultValue={job.emergency_contact_phone ?? ""} inputMode="tel" onBlur={(e) => saveJob({ emergency_contact_phone: e.target.value })} /></Field>
           <Field label="Hire clock starts on"><Select value={job.hire_start_trigger} onChange={(e) => saveJob({ hire_start_trigger: e.target.value })}><option value="job_up_confirmed">Job up confirmed</option><option value="handover_emailed">Handover emailed</option></Select></Field>
         </div>
-        <p className="px-4 pb-3 text-xs text-slate-500">Changed the supervisor or emergency contact? Click Regenerate on each draft RAMS. Issuing does it for you.</p>
+        <p className="px-4 pb-3 text-xs text-slate-500">Changed the supervisor or emergency contact? Click Regenerate on each draft RAMS. Signing does it for you.</p>
       </Card>
 
       {(job.sites ?? []).map((site: any) => (
@@ -165,7 +165,7 @@ function EditScaffoldModal({ s, onClose, onSaved }: any) {
         <Field label="Planned days to erect"><Input inputMode="numeric" value={f.planned_days} onChange={(e) => setF({ ...f, planned_days: e.target.value })} /></Field>
         <Field label="Planned crew size" hint="Goes on the RAMS as manpower until the put-up is on the board."><Input inputMode="numeric" value={f.planned_crew} onChange={(e) => setF({ ...f, planned_crew: e.target.value })} /></Field>
       </div>
-      <p className="mt-3 text-xs text-slate-500">Saving updates a draft RAMS straight away. Parts you edited in Word are kept as you wrote them, so change these details in them by hand if they appear there. An issued RAMS never changes: start a new revision instead.</p>
+      <p className="mt-3 text-xs text-slate-500">Saving updates a draft RAMS straight away. Parts you edited in Word are kept as you wrote them, so change these details in them by hand if they appear there. A signed RAMS never changes: start a new revision instead.</p>
       <div className="mt-4 flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button onClick={save} disabled={busy}>{busy ? "Saving…" : "Save"}</Button></div>
     </Modal>
   );
@@ -184,7 +184,7 @@ function FirstLift({ value, onChange }: { value: number; onChange: (v: number) =
 }
 
 function ScaffoldPanel({ s, docs, isOwner, companyId, onMsg, reload }: any) {
-  const [modal, setModal] = useState<"" | "sheet" | "erect" | "inspect" | "signed" | "edit">("");
+  const [modal, setModal] = useState<"" | "sheet" | "erect" | "inspect" | "signed" | "edit" | "signRams">("");
   const [busy, setBusy] = useState(false);
   const act = async (fn: () => Promise<any>, ok: (r: any) => string) => { setBusy(true); try { const r = await fn(); onMsg({ ok: true, text: ok(r) }); reload(); } catch (e: any) { onMsg({ ok: false, text: e.message }); } setBusy(false); };
   const rams = docs.filter((d: any) => d.type === "rams").sort((a: any, b: any) => b.revision_no - a.revision_no)[0];
@@ -201,11 +201,16 @@ function ScaffoldPanel({ s, docs, isOwner, companyId, onMsg, reload }: any) {
   const afterEdit = () => {
     setModal("");
     if (draft) return refreshDraft("Details saved.");
-    onMsg({ ok: true, text: rams?.issued_at ? "Details saved. The issued RAMS still shows the old details: click New revision if the change affects it." : "Details saved." });
+    onMsg({ ok: true, text: rams?.issued_at ? "Details saved. The signed RAMS still shows the old details: click New revision if the change affects it." : "Details saved." });
+    reload();
+  };
+  const signRams = async (pin: string) => {
+    const r = await api(`/scaffolds/${s.id}/rams/issue`, { method: "POST", body: JSON.stringify({ pin }) });
+    onMsg({ ok: true, text: `RAMS signed by ${r.signed_by} and issued. It can no longer be changed; changes need a new revision.` });
     reload();
   };
   const uploadEdited = (kind: string, file: File) => act(async () => { const fd = new FormData(); fd.append("kind", kind); fd.append("file", file); return api(`/scaffolds/${s.id}/rams/edited`, { method: "POST", body: fd }); },
-    (r) => `Edited ${DOC_NAMES[kind].toLowerCase()} saved for this scaffold.` + (r.missing.length ? ` Still to fill before issue: ${r.missing.join(", ")}.` : " Ready to issue."));
+    (r) => `Edited ${DOC_NAMES[kind].toLowerCase()} saved for this scaffold.` + (r.missing.length ? ` Still to fill before signing: ${r.missing.join(", ")}.` : " Ready to sign."));
   const discardEdit = (kind: string) => { if (!confirm(`Put the ${DOC_NAMES[kind].toLowerCase()} back to the standard wording? Your edits to it will be lost.`)) return; act(() => api(`/scaffolds/${s.id}/rams/discard-edit`, { method: "POST", body: JSON.stringify({ kind }) }), () => `${DOC_NAMES[kind]} put back to the standard wording, filled in fresh.`); };
   return (
     <div className="rounded-lg border">
@@ -220,14 +225,14 @@ function ScaffoldPanel({ s, docs, isOwner, companyId, onMsg, reload }: any) {
           <ol className="space-y-2 text-sm">
             <Step done={!!sheet} label={sheet ? `Drawing ref ${sheet.reference ?? ""} (${sheetName(sheet.type)})` : "Drawing ref (compliance sheet or bespoke design)"} action={!sheet && <Button size="sm" variant="secondary" onClick={() => setModal("sheet")}>Record</Button>} />
             {!sheet && <li className="ml-6 text-xs text-slate-500">Not recorded yet: the RAMS says "To follow", and the scaffold can't be scheduled or erected until it is recorded.</li>}
-            <Step done={!!rams} label={rams ? `RAMS pack revision ${rams.revision_no}${rams.issued_at ? `, issued ${ukDate(rams.issued_at)}` : " (draft)"}` : "RAMS pack"} action={
-              <div className="flex gap-1"><Button size="sm" variant="secondary" disabled={busy} onClick={() => act(() => api(`/scaffolds/${s.id}/rams`, { method: "POST" }), (r) => `RAMS revision ${r.revision} ${draft ? "updated" : "generated"}${keptText(r)}` + (r.missing.length ? ` Fill before issue: ${r.missing.join(", ")}.` : " Ready to issue."))}>{rams ? (rams.issued_at ? "New revision" : "Regenerate") : "Generate"}</Button>
-                {draft && <Button size="sm" disabled={busy || draft.missing_fields?.length > 0} onClick={() => act(() => api(`/scaffolds/${s.id}/rams/issue`, { method: "POST" }), () => "RAMS issued. It can no longer be changed; changes need a new revision.")}>Issue</Button>}</div>} />
-            {issuedBeforeSheet && <li className="ml-6 text-xs text-amber-700">This RAMS was issued before the drawing ref was recorded, so it says "To follow". Click New revision to issue one that cites {sheet.reference}.</li>}
-            {draft?.missing_fields?.length > 0 && <li className="ml-6 text-xs text-amber-700">Empty before issue: {draft.missing_fields.join(", ")}. Most come from Edit details (planned start, crew) and the job details above.</li>}
+            <Step done={!!rams} label={rams ? `RAMS pack revision ${rams.revision_no}${rams.issued_at ? `, signed and issued ${ukDate(rams.issued_at)}` : " (draft)"}` : "RAMS pack"} action={
+              <div className="flex gap-1"><Button size="sm" variant="secondary" disabled={busy} onClick={() => act(() => api(`/scaffolds/${s.id}/rams`, { method: "POST" }), (r) => `RAMS revision ${r.revision} ${draft ? "updated" : "generated"}${keptText(r)}` + (r.missing.length ? ` Fill before signing: ${r.missing.join(", ")}.` : " Ready to sign."))}>{rams ? (rams.issued_at ? "New revision" : "Regenerate") : "Generate"}</Button>
+                {draft && <Button size="sm" disabled={busy || draft.missing_fields?.length > 0} onClick={() => setModal("signRams")}>Sign and issue</Button>}</div>} />
+            {issuedBeforeSheet && <li className="ml-6 text-xs text-amber-700">This RAMS was signed before the drawing ref was recorded, so it says "To follow". Click New revision to sign one that cites {sheet.reference}.</li>}
+            {draft?.missing_fields?.length > 0 && <li className="ml-6 text-xs text-amber-700">Empty before signing: {draft.missing_fields.join(", ")}. Most come from Edit details (planned start, crew) and the job details above.</li>}
             {draft && <li className="ml-6 text-xs text-slate-500">Site-specific methods: download the Word file below, edit it, then Upload edited. Regenerate keeps any part you edited.</li>}
             <Step done={["on_hire", "dismantle_requested", "dismantling", "dismantled"].includes(s.status)} label={s.erected_at ? `Erected ${ukDate(s.erected_at)}` : "Confirm erected"} action={!s.erected_at && <Button size="sm" onClick={() => setModal("erect")}>Confirm erected</Button>} />
-            {pendingHandover && <li className="ml-6 flex flex-wrap items-center gap-2 text-xs text-red-700">Handover {pendingHandover.reference} is not signed.{isOwner && <Button size="sm" variant="secondary" onClick={() => setModal("signed")}>Record client confirmation</Button>}</li>}
+            {pendingHandover && <li className="ml-6 flex flex-wrap items-center gap-2 text-xs text-red-700">Handover {pendingHandover.reference} is not signed by the client.{isOwner && <Button size="sm" variant="secondary" onClick={() => setModal("signed")}>Record client confirmation</Button>}</li>}
             {s.erected_at && <Step done={false} label="Inspection report" action={<Button size="sm" variant="secondary" onClick={() => setModal("inspect")}>New inspection</Button>} />}
           </ol>
           {busy && <p className="text-xs text-slate-500">Working… making the Word and PDF files can take up to half a minute.</p>}
@@ -239,6 +244,7 @@ function ScaffoldPanel({ s, docs, isOwner, companyId, onMsg, reload }: any) {
       {modal === "inspect" && <InspectionModal scaffoldId={s.id} open onClose={() => setModal("")} onDone={(m) => { onMsg(m); reload(); }} />}
       {modal === "signed" && pendingHandover && <SignedModal docId={pendingHandover.id} onClose={() => setModal("")} onDone={(m: any) => { onMsg(m); reload(); }} />}
       {modal === "edit" && <EditScaffoldModal s={s} onClose={() => setModal("")} onSaved={afterEdit} />}
+      {modal === "signRams" && draft && <SignModal title="Sign and issue the RAMS" what={`You are signing ${draft.reference ?? "the RAMS"}, revision ${draft.revision_no}, for ${s.name}: the method statement and the risk assessment. Once signed it is issued and can't be changed; any change needs a new revision.`} onSign={signRams} onClose={() => setModal("")} />}
     </div>
   );
 }
@@ -256,7 +262,7 @@ function DocList({ docs, busy, onUpload, onDiscard }: { docs: any[]; busy?: bool
         const editable = d.type === "rams" && !d.issued_at && RAMS_PARTS.includes(k);
         return (
           <div key={i} className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 text-xs">
-            <span className="flex flex-wrap items-center gap-1">{DOC_NAMES[k] ?? k} · {d.reference ?? ""}{d.type === "rams" ? ` r${d.revision_no}` : ""}{d.issued_at ? " · issued" : " · draft"}{v.edited_by && <Badge tone="amber">edited by {v.edited_by}, {ukDate(v.edited_at)}</Badge>}</span>
+            <span className="flex flex-wrap items-center gap-1">{DOC_NAMES[k] ?? k} · {d.reference ?? ""}{d.type === "rams" ? ` r${d.revision_no}` : ""}{d.issued_at ? " · issued" : " · draft"}{v.edited_by && <Badge tone="amber">edited by {v.edited_by}, {ukDate(v.edited_at)}</Badge>}{v.signed_by && <Badge tone="green">signed by {v.signed_by}</Badge>}</span>
             <span className="flex flex-wrap gap-1">{v.pdf && <Button size="sm" variant="ghost" onClick={() => download(`/files?path=${encodeURIComponent(v.pdf)}`, v.pdf.split("/").pop())}>PDF</Button>}<Button size="sm" variant="ghost" onClick={() => download(`/files?path=${encodeURIComponent(v.docx)}`, v.docx.split("/").pop())}>Word</Button>
               {editable && onUpload && <label className={cn("inline-flex min-h-8 cursor-pointer items-center rounded-md px-3 text-xs font-medium text-slate-700 hover:bg-slate-100", busy && "pointer-events-none opacity-50")}>Upload edited<input type="file" accept=".docx" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) onUpload(k, f); }} /></label>}
               {editable && v.edited_by && onDiscard && <Button size="sm" variant="ghost" disabled={busy} onClick={() => onDiscard(k)}>Discard edit</Button>}</span>

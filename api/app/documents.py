@@ -1,12 +1,14 @@
-"""Filling Word templates safely, checking required fields, padding logos and converting to PDF."""
+"""Filling Word templates safely, checking required fields, padding logos, signatures and converting to PDF."""
 import html, io, os, pathlib, shutil, subprocess, tempfile, zipfile, re
-from docxtpl import DocxTemplate
+from docxtpl import DocxTemplate, InlineImage
+from docx.shared import Mm
 from jinja2.sandbox import SandboxedEnvironment
 from PIL import Image
 from .fields import REQUIRED
 
 LOGO_RATIO = 1.6                     # every template's logo frame is about 1.6 wide : 1 high
 BANNER = "NOT AUTHORISED FOR USE UNTIL SIGNED"
+SIGNATURE_HEIGHT_MM = 14
 
 def sandbox() -> SandboxedEnvironment:
     # autoescape keeps "Smith & Sons" valid XML; None renders as blank
@@ -26,17 +28,49 @@ def pad_logo(image_bytes: bytes, ratio: float = LOGO_RATIO, max_w: int = 800) ->
 def blank_logo() -> bytes:
     out = io.BytesIO(); Image.new("RGBA", (16, 10), (255, 255, 255, 0)).save(out, "PNG"); return out.getvalue()
 
+def clean_signature(image_bytes: bytes) -> bytes:
+    """A drawn or photographed signature -> a trimmed PNG with a see-through background, so it sits on any form."""
+    try:
+        im = Image.open(io.BytesIO(image_bytes)); im.load()
+    except Exception:
+        raise ValueError("That file isn't a picture. Draw your signature, or upload a photo of it.")
+    im = im.convert("RGBA"); im.thumbnail((1800, 1800))
+    im.putdata([(r, g, b, 0) if r > 200 and g > 200 and b > 200 else (r, g, b, a) for (r, g, b, a) in im.getdata()])
+    box = im.getchannel("A").getbbox()
+    if not box:
+        raise ValueError("The signature is blank. Draw it or upload it again.")
+    im = im.crop(box); im.thumbnail((900, 300))
+    out = io.BytesIO(); im.save(out, "PNG"); return out.getvalue()
+
 def has_logo_picture(docx_bytes: bytes) -> bool:
     z = zipfile.ZipFile(io.BytesIO(docx_bytes))
     return any(re.search(rb'<pic:cNvPr[^>]*\bname="logo"', z.read(n)) for n in z.namelist()
                if n.startswith("word/") and n.endswith(".xml"))
 
-def render(template_bytes: bytes, context: dict, logo_png: bytes | None = None) -> bytes:
+def render(template_bytes: bytes, context: dict, logo_png: bytes | None = None, images: dict | None = None) -> bytes:
+    """Fills a template. `images` puts a picture (a saved signature) where that field would otherwise print text."""
     tpl = DocxTemplate(io.BytesIO(template_bytes))
     if has_logo_picture(template_bytes):
         tpl.replace_pic("logo", io.BytesIO(logo_png or blank_logo()))
-    tpl.render(context, jinja_env=sandbox())
+    ctx = dict(context)
+    for k, png in (images or {}).items():
+        if png:
+            ctx[k] = InlineImage(tpl, io.BytesIO(png), height=Mm(SIGNATURE_HEIGHT_MM))
+    tpl.render(ctx, jinja_env=sandbox())
     out = io.BytesIO(); tpl.save(out); return out.getvalue()
+
+def add_signature_block(docx_bytes: bytes, png: bytes | None, lines: list[str]) -> bytes:
+    """A dated "Signed electronically" block at the end of a document. Every signed RAMS part gets one; a part edited
+    by hand (whose signature box is gone) also gets the signature image in it."""
+    from docx import Document
+    from docx.shared import Pt
+    doc = Document(io.BytesIO(docx_bytes))
+    head = doc.add_paragraph(); r = head.add_run("Signed electronically"); r.bold = True
+    if png:
+        doc.add_paragraph().add_run().add_picture(io.BytesIO(png), height=Mm(SIGNATURE_HEIGHT_MM))
+    for line in lines:
+        run = doc.add_paragraph().add_run(line); run.font.size = Pt(9)
+    out = io.BytesIO(); doc.save(out); return out.getvalue()
 
 def add_banner(docx_bytes: bytes) -> bytes:
     """The unsigned-handover banner is a safety control: forced into uploaded handover templates."""

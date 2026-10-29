@@ -48,6 +48,51 @@ def health():
     from .documents import soffice_path
     return {"ok": True, "pdf": bool(soffice_path())}
 
+# ---------- signing ----------
+PIN_ERRORS = {"wrong": (403, "That signing PIN is not right."),
+              "locked": (429, "Too many wrong PINs. Signing is locked for 15 minutes."),
+              "no_pin": (409, "Set your signing PIN in Settings, under My signature, first.")}
+
+def require_pin(user: str, pin) -> None:
+    """Checked in its own transaction before any signing work, so a wrong try is always counted, even when the
+    signing step itself then fails."""
+    if not pin: raise HTTPException(422, "Enter your signing PIN.")
+    with as_user(user) as cur:
+        status = S.check_pin(cur, str(pin))
+    if status != "ok":
+        code, msg = PIN_ERRORS.get(status, (403, "That signing PIN is not right."))
+        raise HTTPException(code, msg)
+
+class PinIn(BaseModel):
+    pin: str = ""
+
+class SetPinIn(BaseModel):
+    pin: str
+    current_pin: str | None = None
+
+@app.get("/me/signing")
+def me_signing(user=Depends(current_user)):
+    with as_user(user) as cur: return S.signing_status(cur)
+
+@app.post("/me/signature")
+async def me_signature(file: UploadFile = File(...), user=Depends(current_user)):
+    data = await file.read()
+    if len(data) > 8 * 1024 * 1024: raise HTTPException(422, "The picture must be under 8 MB.")
+    with as_user(user) as cur: return S.save_signature(cur, data)
+
+@app.post("/me/signing-pin")
+def me_signing_pin(body: SetPinIn, user=Depends(current_user)):
+    with as_user(user) as cur:
+        status = S.set_signing_pin(cur, body.pin, body.current_pin)
+    if status == "ok": return {"ok": True}
+    code, msg = {"bad_format": (422, "The PIN must be 4 to 6 digits."), "wrong_current": (403, "Your current PIN is not right."),
+                 "locked": (429, "Too many wrong PINs. Signing is locked for 15 minutes.")}.get(status, (422, "The PIN was not saved."))
+    raise HTTPException(code, msg)
+
+@app.post("/people/{profile_id}/reset-signing-pin")
+def people_reset_pin(profile_id: str, user=Depends(current_user)):
+    with as_user(user) as cur: return S.reset_signing_pin(cur, profile_id)
+
 # ---------- calculators (no database) ----------
 class HakiIn(BaseModel):
     target_m: float; lift_m: float; orientation: str = "width_against"
@@ -111,7 +156,8 @@ def scaffold_rams_discard(sid: str, body: DiscardIn, user=Depends(current_user))
     with as_user(user) as cur: return S.generate_rams(cur, sid, discard=body.kind)
 
 @app.post("/scaffolds/{sid}/rams/issue")
-def scaffold_rams_issue(sid: str, user=Depends(current_user)):
+def scaffold_rams_issue(sid: str, body: PinIn | None = None, user=Depends(current_user)):
+    require_pin(user, body.pin if body else "")
     with as_user(user) as cur: return S.issue_rams(cur, sid)
 
 @app.post("/scaffolds/{sid}/confirm-erected")
@@ -120,6 +166,7 @@ def scaffold_confirm(sid: str, body: dict, user=Depends(current_user)):
 
 @app.post("/scaffolds/{sid}/inspections")
 def scaffold_inspection(sid: str, body: dict, user=Depends(current_user)):
+    require_pin(user, body.get("pin"))
     with as_user(user) as cur: return S.create_inspection(cur, sid, body)
 
 @app.post("/handovers/{doc_id}/mark-signed")

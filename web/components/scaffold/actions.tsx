@@ -1,5 +1,5 @@
 "use client";
-/* Forms shared by the dashboard and the job page: record the drawing ref, confirm erected, inspection.
+/* Forms shared by the dashboard and the job page: record the drawing ref, confirm erected, inspection, and signing.
    A failed save shows its reason inside the form, so it is never hidden behind it. */
 import { useState } from "react";
 import { api } from "@/lib/api";
@@ -7,9 +7,35 @@ import { Button, Field, Input, Modal, Select, Textarea } from "@/components/ui";
 
 type Done = (msg: { ok: boolean; text: string }) => void;
 
+/** Draft wording for the solicitor to review. */
+export const SIGN_STATEMENT = "By tapping Sign I confirm that I have read and checked this document, and that I am applying my saved signature to it as my legal electronic signature.";
+
 function FormError({ text }: { text: string }) {
   if (!text) return null;
   return <p role="alert" className="mt-4 rounded-md bg-red-50 px-3 py-2 text-sm text-red-800">{text}</p>;
+}
+
+function PinInput({ value, onChange, onEnter }: { value: string; onChange: (v: string) => void; onEnter?: () => void }) {
+  return <Input type="password" inputMode="numeric" autoComplete="off" maxLength={6} value={value} onChange={(e) => onChange(e.target.value.replace(/\D/g, ""))} onKeyDown={(e) => { if (e.key === "Enter" && onEnter) onEnter(); }} />;
+}
+
+/** The legal signature step: the statement, the signer's PIN, and the Sign button. */
+export function SignModal({ title, what, onSign, onClose }: { title: string; what: string; onSign: (pin: string) => Promise<void>; onClose: () => void }) {
+  const [pin, setPin] = useState(""); const [err, setErr] = useState(""); const [busy, setBusy] = useState(false);
+  const go = async () => {
+    if (!/^\d{4,6}$/.test(pin)) return setErr("Enter your 4 to 6 digit signing PIN.");
+    setBusy(true); setErr("");
+    try { await onSign(pin); onClose(); } catch (e: any) { setErr(e.message); setBusy(false); setPin(""); }
+  };
+  return (
+    <Modal open onClose={onClose} title={title}>
+      <p className="text-sm text-slate-700">{what}</p>
+      <p className="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-800">{SIGN_STATEMENT}</p>
+      <Field label="Your signing PIN" className="mt-3"><PinInput value={pin} onChange={setPin} onEnter={go} /></Field>
+      <FormError text={err} />
+      <div className="mt-4 flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button onClick={go} disabled={busy}>{busy ? "Signing… this can take half a minute" : "Sign: this is my legal signature"}</Button></div>
+    </Modal>
+  );
 }
 
 const SHEET_NUMBERS: Record<string, string> = { max_lift_height_m: "Max lift height (m)", max_height_m: "Max height (m)", max_leg_load_kn: "Max leg load (kN)" };
@@ -75,12 +101,12 @@ export function ConfirmErectedModal({ scaffoldId, open, onClose, onDone }: { sca
     setBusy(true); setErr("");
     try {
       const r = await api(`/scaffolds/${scaffoldId}/confirm-erected`, { method: "POST", body: JSON.stringify(f) });
-      onDone({ ok: true, text: `Scaffold on hire. Handover certificate ${r.certificate_ref} created, unsigned.` + (r.missing.length ? ` Still empty: ${r.missing.join(", ")}.` : "") });
+      onDone({ ok: true, text: `Scaffold on hire. Handover certificate ${r.certificate_ref} created${r.signed ? " and signed by you as issuer" : " with your name only (no saved signature yet: add one in Settings)"}; it shows NOT AUTHORISED FOR USE until the client confirms.` + (r.missing.length ? ` Still empty: ${r.missing.join(", ")}.` : "") });
       onClose();
     } catch (e: any) { setErr(e.message); setBusy(false); }
   };
   return (
-    <Modal open={open} onClose={onClose} title="Confirm erected" wide>
+    <Modal open={open} onClose={onClose} title="Confirm erected and sign the handover" wide>
       <p className="mb-4 text-sm text-slate-600">This puts the scaffold on hire and creates the handover certificate. It shows <b className="text-red-700">NOT AUTHORISED FOR USE UNTIL SIGNED</b> until the client confirms. Blank fields fill from the compliance sheet.</p>
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="Permitted use"><Input value={f.permitted_use} onChange={set("permitted_use")} /></Field>
@@ -92,8 +118,9 @@ export function ConfirmErectedModal({ scaffoldId, open, onClose, onDone }: { sca
         <Field label="Their phone"><Input inputMode="tel" onChange={set("inspection_responsible_phone")} /></Field>
         <Field label="Next inspection due" hint="Defaults to 7 days from today"><Input type="date" onChange={set("next_inspection_due")} /></Field>
       </div>
+      <p className="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-800">Your saved signature goes on the handover certificate as the person issuing it. Tapping the button below is your legal signature to the certificate.</p>
       <FormError text={err} />
-      <div className="mt-4 flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button onClick={go} disabled={busy}>{busy ? "Working…" : "Confirm erected"}</Button></div>
+      <div className="mt-4 flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button onClick={go} disabled={busy}>{busy ? "Working…" : "Confirm erected and sign"}</Button></div>
     </Modal>
   );
 }
@@ -108,14 +135,16 @@ export function InspectionModal({ scaffoldId, open, onClose, onDone }: { scaffol
   const [f, setF] = useState<any>({ inspection_type: "7-day", inspected_at: local, next_inspection_due: week, tag_updated: true, outcome: "Safe to use", weather: "", copies_sent_to: "Office" });
   const [items, setItems] = useState(CHECKLIST.map((item) => ({ item, result: "", comment: "" })));
   const [defects, setDefects] = useState<any[]>([]);
+  const [pin, setPin] = useState("");
   const [busy, setBusy] = useState(false); const [err, setErr] = useState("");
   const go = async () => {
+    if (!/^\d{4,6}$/.test(pin)) return setErr("Enter your 4 to 6 digit signing PIN to sign the report.");
     setBusy(true); setErr("");
     try {
-      const r = await api(`/scaffolds/${scaffoldId}/inspections`, { method: "POST", body: JSON.stringify({ ...f, checklist: items, defects }) });
-      onDone({ ok: true, text: `Inspection report ${r.report_ref} created.` + (r.missing.length ? ` Not ready to issue: ${r.missing.join("; ")}.` : "") });
+      const r = await api(`/scaffolds/${scaffoldId}/inspections`, { method: "POST", body: JSON.stringify({ ...f, checklist: items, defects, pin, device_signed_at: new Date().toISOString() }) });
+      onDone({ ok: true, text: `Inspection report ${r.report_ref} signed by ${r.signed_by} and issued.` });
       onClose();
-    } catch (e: any) { setErr(e.message); setBusy(false); }
+    } catch (e: any) { setErr(e.message); setBusy(false); setPin(""); }
   };
   return (
     <Modal open={open} onClose={onClose} title="Inspection report" wide>
@@ -150,9 +179,11 @@ export function InspectionModal({ scaffoldId, open, onClose, onDone }: { scaffol
         <Field label="Next inspection due"><Input type="date" value={f.next_inspection_due} onChange={(e) => setF({ ...f, next_inspection_due: e.target.value })} /></Field>
         <Field label="Copies sent to"><Input value={f.copies_sent_to} onChange={(e) => setF({ ...f, copies_sent_to: e.target.value })} /></Field>
       </div>
-      <p className="mt-3 text-xs text-slate-500">The checklist prompts the inspection; it does not replace the inspector's judgement. Signing with re-authentication comes in a later update.</p>
+      <p className="mt-3 text-xs text-slate-500">The checklist prompts the inspection; it does not replace the inspector's judgement. Only the inspector who did the inspection signs, and a signed report can't be changed: a correction is a new report.</p>
+      <p className="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-800">{SIGN_STATEMENT}</p>
+      <Field label="Your signing PIN" className="mt-3 sm:w-60"><PinInput value={pin} onChange={setPin} /></Field>
       <FormError text={err} />
-      <div className="mt-4 flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button onClick={go} disabled={busy}>{busy ? "Working…" : "Create report"}</Button></div>
+      <div className="mt-4 flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button onClick={go} disabled={busy}>{busy ? "Signing…" : "Sign and create report"}</Button></div>
     </Modal>
   );
 }

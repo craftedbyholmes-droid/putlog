@@ -1,6 +1,7 @@
-"""Acceptance tests 4, 7 and 14 (maths and CSV), plus the VAT figures from B6."""
+"""Acceptance tests 4, 7 and 14 (maths and CSV), plus the VAT figures from B6, plus fixed-price scaffolds."""
 import csv, io
 from decimal import Decimal
+import pytest
 from app import quotes
 
 SCAFF = {"name": "Front elevation", "pricing_mode": "squareage"}
@@ -33,3 +34,19 @@ def test_haki_and_tube_priced_separately():
                                       haki_calc={"target_height_m": 6.0})
     assert tower[0]["line_total"] == Decimal("270.00") and tower[0]["unit"] == "m (height)"
     assert quotes.totals(tube + tower, False)["total"] == Decimal("648.00")
+
+def test_fixed_price_one_line_per_item_and_ignores_measurements():
+    s = {"name": "Front", "pricing_mode": "fixed",
+         "price_items": [{"id": "a", "description": "Scaffold as quoted", "price": 1250},
+                         {"id": "b", "description": "Loading bay", "price": "180.50"}]}
+    lines = quotes.lines_for_scaffold(s, ELEV, Decimal("3.50"))     # measurements and rate must not change a fixed price
+    assert [l["description"] for l in lines] == ["Front: Scaffold as quoted", "Front: Loading bay"]
+    assert all(l["quantity"] == Decimal("1.00") and l["unit"] == "item" for l in lines)
+    t = quotes.totals(lines, True)
+    assert t["subtotal"] == Decimal("1430.50") and t["vat_amount"] == Decimal("286.10") and t["total"] == Decimal("1716.60")
+
+@pytest.mark.parametrize("items", [[], [{"description": "Extra", "price": ""}], [{"description": "Extra", "price": -5}],
+                                   [{"description": "Extra", "price": "abc"}], [{"description": "Extra"}]])
+def test_fixed_price_refuses_missing_or_bad_price(items):
+    with pytest.raises(ValueError):
+        quotes.lines_for_scaffold({"name": "Front", "pricing_mode": "fixed", "price_items": items}, [], None)

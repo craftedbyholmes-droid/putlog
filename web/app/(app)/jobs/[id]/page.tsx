@@ -9,6 +9,8 @@ import { HakiResult } from "@/components/HakiResult";
 
 type Msg = { ok: boolean; text: string } | null;
 const STATUS_TONE: Record<string, any> = { planned: "slate", rams_raised: "violet", erecting: "blue", on_hire: "green", dismantle_requested: "amber", dismantling: "amber", dismantled: "slate" };
+// Stable keys for fixed-price items. Not crypto.randomUUID: that is missing on plain http (a phone on the local network).
+const newId = () => Math.random().toString(36).slice(2, 10);
 
 export default function JobPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -68,7 +70,7 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
       <Button variant="secondary" onClick={() => setNewSite(true)}>Add another site</Button>
 
       <Card><CardHeader title="Quotes" action={<Button size="sm" onClick={buildQuote}>Build quote from measurements</Button>} />
-        <div className="divide-y">{quotes.length === 0 ? <p className="p-4 text-sm text-slate-500">No quote yet. Enter elevations (or run the HAKI calculator) and set your rates in Settings, then build the quote.</p> : quotes.map((q) => {
+        <div className="divide-y">{quotes.length === 0 ? <p className="p-4 text-sm text-slate-500">No quote yet. Enter elevations, a fixed price, or run the HAKI calculator, and set your rates in Settings, then build the quote.</p> : quotes.map((q) => {
           const net = (q.quote_lines ?? []).reduce((a: number, l: any) => a + Number(l.line_total), 0);
           const gross = q.vat_registered ? net * (1 + Number(q.vat_rate) / 100) : net;
           return (
@@ -94,11 +96,18 @@ function NewSiteModal({ jobId, companyId, onClose, onSaved }: any) {
 }
 
 function NewScaffoldModal({ siteId, companyId, onClose, onSaved }: any) {
-  const [f, setF] = useState<any>({ name: "", kind: "tube_fitting", pricing_mode: "squareage", first_lift_m: 2.0, lift_m: 2.0, item_no: 1, planned_start_date: "", planned_days: "" });
+  const [f, setF] = useState<any>({ name: "", kind: "tube_fitting", pricing_mode: "squareage", fixed_price: "", first_lift_m: 2.0, lift_m: 2.0, item_no: 1, planned_start_date: "", planned_days: "" });
   useEffect(() => { (async () => { const { data } = await supabase().from("companies").select("default_first_lift_m").eq("id", companyId).single(); if (data) setF((x: any) => ({ ...x, first_lift_m: Number(data.default_first_lift_m) })); })(); }, [companyId]);
   const save = async () => {
     if (!f.name.trim()) return alert("Give the scaffold a name, e.g. Front elevation.");
-    const row = { ...f, site_id: siteId, company_id: companyId, planned_start_date: f.planned_start_date || null, planned_days: f.planned_days || null };
+    let price_items: any[] = [];
+    if (f.pricing_mode === "fixed") {
+      const p = Number(f.fixed_price);
+      if (String(f.fixed_price).trim() === "" || isNaN(p) || p < 0) return alert("Enter the fixed price in pounds, e.g. 1250.");
+      price_items = [{ id: newId(), description: "Scaffold as quoted", price: p }];
+    }
+    const { fixed_price, ...rest } = f;
+    const row = { ...rest, price_items, site_id: siteId, company_id: companyId, planned_start_date: f.planned_start_date || null, planned_days: f.planned_days || null };
     const { error } = await supabase().from("scaffolds").insert(row); if (error) alert(error.message); else onSaved();
   };
   const tower = f.kind === "haki_stair_tower";
@@ -106,11 +115,13 @@ function NewScaffoldModal({ siteId, companyId, onClose, onSaved }: any) {
     <Modal open onClose={onClose} title="Add scaffold" wide>
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="Name / work area"><Input placeholder="e.g. Front elevation" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></Field>
-        <Field label="Type"><Select value={f.kind} onChange={(e) => setF({ ...f, kind: e.target.value, pricing_mode: e.target.value === "haki_stair_tower" ? "height" : "squareage" })}><option value="tube_fitting">Tube and fitting</option><option value="haki_stair_tower">HAKI stair tower</option></Select></Field>
+        <Field label="Type"><Select value={f.kind} onChange={(e) => setF({ ...f, kind: e.target.value, pricing_mode: f.pricing_mode === "fixed" ? "fixed" : e.target.value === "haki_stair_tower" ? "height" : "squareage" })}><option value="tube_fitting">Tube and fitting</option><option value="haki_stair_tower">HAKI stair tower</option></Select></Field>
         <Field label="Priced by" hint="HAKI and tube-and-fitting are priced separately">
           <Select value={f.pricing_mode} onChange={(e) => setF({ ...f, pricing_mode: e.target.value })}>
             {tower ? (<><option value="height">£ per vertical metre</option><option value="component">Components</option></>) : (<><option value="squareage">£ per m² (squareage)</option><option value="meterage">£ per metre run (meterage)</option></>)}
+            <option value="fixed">Fixed price (one figure, plus any extras)</option>
           </Select></Field>
+        {f.pricing_mode === "fixed" && <Field label="Fixed price (£)" hint="Extras such as a loading bay can be added on the scaffold afterwards."><Input inputMode="decimal" placeholder="e.g. 1250" value={f.fixed_price} onChange={(e) => setF({ ...f, fixed_price: e.target.value })} /></Field>}
         {!tower && <FirstLift value={f.first_lift_m} onChange={(v) => setF({ ...f, first_lift_m: v })} />}
         <Field label="Planned start (for the RAMS)"><Input type="date" value={f.planned_start_date} onChange={(e) => setF({ ...f, planned_start_date: e.target.value })} /></Field>
         <Field label="Planned days to erect"><Input inputMode="numeric" value={f.planned_days} onChange={(e) => setF({ ...f, planned_days: e.target.value })} /></Field>
@@ -140,14 +151,15 @@ function ScaffoldPanel({ s, docs, isOwner, companyId, onMsg, reload }: any) {
   const sheet = docs.find((d: any) => ["tg20_21", "tg30", "bespoke_design"].includes(d.type));
   const pendingHandover = docs.find((d: any) => d.type === "handover" && (Array.isArray(d.handovers) ? d.handovers[0] : d.handovers)?.signature_status === "pending");
   const tower = s.kind === "haki_stair_tower";
+  const fixed = s.pricing_mode === "fixed";
   return (
     <div className="rounded-lg border">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-slate-50 px-3 py-2">
-        <div className="flex flex-wrap items-center gap-2"><span className="font-semibold">{s.name}</span><Badge tone={STATUS_TONE[s.status]}>{s.status.replace("_", " ")}</Badge><Badge tone={tower ? "violet" : "slate"}>{tower ? "HAKI tower" : "Tube & fitting"}</Badge>{pendingHandover && <Badge tone="red">Handover unsigned</Badge>}</div>
+        <div className="flex flex-wrap items-center gap-2"><span className="font-semibold">{s.name}</span><Badge tone={STATUS_TONE[s.status]}>{s.status.replace("_", " ")}</Badge><Badge tone={tower ? "violet" : "slate"}>{tower ? "HAKI tower" : "Tube & fitting"}</Badge>{fixed && <Badge tone="amber">Fixed price</Badge>}{pendingHandover && <Badge tone="red">Handover unsigned</Badge>}</div>
         <div className="text-xs text-slate-500">{tower ? "" : `Bottom lift ${s.first_lift_m} m (${ftIn(Number(s.first_lift_m) * 1000)})`}{s.planned_start_date ? ` · planned ${ukDate(s.planned_start_date)}` : ""}</div>
       </div>
       <div className="grid gap-4 p-3 lg:grid-cols-2">
-        <div>{tower ? <HakiPanel s={s} onMsg={onMsg} reload={reload} /> : <Elevations s={s} companyId={companyId} reload={reload} />}</div>
+        <div className="space-y-4">{fixed && <FixedPrice s={s} onMsg={onMsg} reload={reload} />}{tower ? <HakiPanel s={s} onMsg={onMsg} reload={reload} /> : <Elevations s={s} companyId={companyId} reload={reload} />}</div>
         <div className="space-y-3">
           <div className="text-sm font-semibold">Compliance</div>
           <ol className="space-y-2 text-sm">
@@ -205,6 +217,33 @@ function SignedModal({ docId, onClose, onDone }: any) {
       </div>
       <div className="mt-4 flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button onClick={go}>Record</Button></div>
     </Modal>
+  );
+}
+
+function FixedPrice({ s, onMsg, reload }: any) {
+  const items: any[] = Array.isArray(s.price_items) ? s.price_items : [];
+  const save = async (next: any[]) => { const { error } = await supabase().from("scaffolds").update({ price_items: next }).eq("id", s.id); if (error) onMsg({ ok: false, text: error.message }); else reload(); };
+  const setItem = (i: number, patch: any) => save(items.map((x, j) => (j === i ? { ...x, ...patch } : x)));
+  const setPrice = (i: number, v: string) => {
+    if (v.trim() === "") return setItem(i, { price: "" });
+    const p = Number(v);
+    if (isNaN(p) || p < 0) return onMsg({ ok: false, text: "Enter a price in pounds, e.g. 250." });
+    return setItem(i, { price: p });
+  };
+  const total = items.reduce((a, it) => a + (Number(it.price) || 0), 0);
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between"><span className="text-sm font-semibold">Fixed price</span><Button size="sm" variant="secondary" onClick={() => save([...items, { id: newId(), description: "", price: "" }])}>Add extra</Button></div>
+      {items.length === 0 && <p className="text-xs text-amber-700">No price yet. Add one before building the quote.</p>}
+      {items.map((it, i) => (
+        <div key={it.id ?? i} className="flex gap-2">
+          <Input className="min-h-8 flex-1" placeholder={i === 0 ? "e.g. Scaffold as quoted" : "e.g. Loading bay"} defaultValue={it.description ?? ""} onBlur={(e) => setItem(i, { description: e.target.value })} />
+          <Input className="min-h-8 w-28" inputMode="decimal" placeholder="£" defaultValue={it.price ?? ""} onBlur={(e) => setPrice(i, e.target.value)} />
+          <Button size="sm" variant="ghost" onClick={() => save(items.filter((_, j) => j !== i))}>✕</Button>
+        </div>))}
+      {items.length > 0 && <div className="text-right text-sm">Fixed total <b>{gbp(total)}</b></div>}
+      <p className="text-xs text-slate-500">Each line goes on the quote as its own item. Measurements are optional on a fixed price: they still feed pay and the lift layout, never the price.</p>
+    </div>
   );
 }
 
@@ -268,4 +307,3 @@ function HakiPanel({ s, onMsg, reload }: any) {
     </div>
   );
 }
-

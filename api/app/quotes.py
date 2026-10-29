@@ -1,11 +1,11 @@
 """Quote lines and totals. Figures are entered once (rule 11); the client is always quoted on the
-quoted figures, never the as-built ones."""
+quoted figures, never the as-built ones. A fixed-price scaffold is quoted on its own price items."""
 import csv, io
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from . import haki
 
 TWO = Decimal("0.01")
-UNITS = {"squareage": "m²", "meterage": "m", "height": "m (height)", "component": "each"}
+UNITS = {"squareage": "m²", "meterage": "m", "height": "m (height)", "component": "each", "fixed": "item"}
 
 def money(x) -> Decimal:
     return Decimal(str(x)).quantize(TWO, ROUND_HALF_UP)
@@ -29,6 +29,22 @@ def lines_for_scaffold(scaffold: dict, elevations: list[dict], rate: Decimal | N
                 if item["item"] not in (unit_prices or {}):
                     raise haki.HakiInputError(f"No unit price for {item['item']}")
                 out.append(_line(f"{name}: {item['item']}", "component", Decimal(item["qty"]), unit_prices[item["item"]]))
+        return out
+    if mode == "fixed":
+        items = scaffold.get("price_items") or []
+        if not items:
+            raise ValueError(f"{name} is fixed price but has no price yet. Enter it on the scaffold first.")
+        out = []
+        for it in items:
+            desc = str(it.get("description") or "").strip() or "Fixed price"
+            raw = it.get("price")
+            try:
+                price = Decimal(str(raw)) if raw not in (None, "") else None
+            except InvalidOperation:
+                price = None
+            if price is None or not price.is_finite() or price < 0:
+                raise ValueError(f"{name}: '{desc}' needs a price of £0 or more.")
+            out.append(_line(f"{name}: {desc}", "fixed", Decimal("1"), price))
         return out
     raise ValueError(f"Unknown pricing mode {mode}")
 

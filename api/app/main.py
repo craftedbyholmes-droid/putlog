@@ -6,7 +6,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
-from . import config, haki, lifts, services as S, template_checks as T
+from . import config, documents as D, haki, lifts, services as S, template_checks as T
 from .auth import current_user
 from .db import as_user
 
@@ -21,6 +21,19 @@ def db_error(_, exc: psycopg.Error):
     if "row-level security" in msg or "permission denied" in msg:
         return JSONResponse(status_code=403, content={"detail": "You don't have permission to do that."})
     return JSONResponse(status_code=409, content={"detail": msg})
+
+# Pricing and input problems (no rate set, no fixed price, no unit price) are the user's to fix, not server errors.
+@app.exception_handler(haki.HakiInputError)
+def haki_input_error(_, exc: Exception):
+    return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+@app.exception_handler(ValueError)
+def value_error(_, exc: ValueError):
+    return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+@app.exception_handler(D.PdfConversionError)
+def pdf_error(_, exc: Exception):
+    return JSONResponse(status_code=503, content={"detail": f"The Word file was made but the PDF could not be: {exc}"})
 
 @app.on_event("startup")
 def startup():

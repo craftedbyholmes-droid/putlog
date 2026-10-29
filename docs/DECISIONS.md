@@ -18,6 +18,12 @@ These amend "Scaffolding CRM — Agreed Spec & Build Handoff". Fold them into th
   level. The 1.5 m bottom standard is dropped.
 - **Lift toggle on the bottom lift only.** Test 23 amended.
 - **HAKI and tube-and-fitting priced separately:** `scaffolds.pricing_mode` per scaffold.
+- **Fixed price (28 Oct 2026):** a fifth pricing option, `fixed`, for tube-and-fitting and HAKI towers alike. One main
+  figure plus any priced extras (a loading bay, sheeting), stored on the scaffold as `price_items`, so all linked to its
+  site. The quote shows one line per item at quantity 1; measurements and rate cards never change it. Measurements stay
+  optional on a fixed-price scaffold and still feed pay and the lift layout. A whole job priced as one figure is one
+  scaffold set to fixed price. Extras asked for after acceptance are variations and will go through the confirmation
+  trail when it is built. The hand-entered weekly hire-extension rate for fixed-price scaffolds comes with hire billing.
 - **RAMS produced before work starts;** the rule 2 gate is unchanged.
 - **RAMS layout:** logo top right then the document name, in a real page header on every page. All templates name the
   logo picture `logo`.
@@ -35,6 +41,12 @@ These amend "Scaffolding CRM — Agreed Spec & Build Handoff". Fold them into th
 - **Numbering is per firm** (JOB0001, Q0001, HC0001, IR0001), so firms can't infer each other's volumes.
 - **Uploaded templates may not contain outside links** (including hyperlinks), as the spec says. Firms may object;
   revisit after testing.
+- **Windows development (29 Oct 2026):** LibreOffice is not on the system path after install, so `api\.env` sets
+  `SOFFICE_PATH`. The conversion now builds its profile address as a proper file URI on every OS (the old form crashed
+  LibreOffice on Windows with "bootstrap.ini is corrupt"), never waits on a prompt, and reports a failed conversion as
+  a 503 with LibreOffice's message. First tested on Windows with real local Supabase: all automated tests pass.
+- **Pricing and input errors are 422s, not server errors.** "No rate set", "no fixed price" and missing unit prices now
+  reach the user as a readable message.
 
 ## Adopted defaults (confirm or change)
 - `scaffolds.status` starts at `planned`; new `staff_absences`, `quotes`, `quote_lines` tables.

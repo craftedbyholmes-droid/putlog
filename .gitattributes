@@ -1,0 +1,9 @@
+# Keep Linux line endings in the repo and the working copy: Railway's Docker images run on Linux.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.docx binary
+*.xlsx binary
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary

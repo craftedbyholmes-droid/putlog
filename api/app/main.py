@@ -98,6 +98,18 @@ def scaffold_sheet(sid: str, body: dict, user=Depends(current_user)):
 def scaffold_rams(sid: str, user=Depends(current_user)):
     with as_user(user) as cur: return S.generate_rams(cur, sid)
 
+@app.post("/scaffolds/{sid}/rams/edited")
+async def scaffold_rams_edited(sid: str, kind: str = Form(...), file: UploadFile = File(...), user=Depends(current_user)):
+    data = await file.read()
+    with as_user(user) as cur: return S.upload_rams_edit(cur, sid, kind, file.filename or "edited.docx", data)
+
+class DiscardIn(BaseModel):
+    kind: str
+
+@app.post("/scaffolds/{sid}/rams/discard-edit")
+def scaffold_rams_discard(sid: str, body: DiscardIn, user=Depends(current_user)):
+    with as_user(user) as cur: return S.generate_rams(cur, sid, discard=body.kind)
+
 @app.post("/scaffolds/{sid}/rams/issue")
 def scaffold_rams_issue(sid: str, user=Depends(current_user)):
     with as_user(user) as cur: return S.issue_rams(cur, sid)

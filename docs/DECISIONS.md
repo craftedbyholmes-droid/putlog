@@ -24,27 +24,42 @@ These amend "Scaffolding CRM — Agreed Spec & Build Handoff". Fold them into th
   optional on a fixed-price scaffold and still feed pay and the lift layout. A whole job priced as one figure is one
   scaffold set to fixed price. Extras asked for after acceptance are variations and will go through the confirmation
   trail when it is built. The hand-entered weekly hire-extension rate for fixed-price scaffolds comes with hire billing.
+- **Quote CSV stays one row per line item with no totals (29 Oct 2026).** A totals row or totals columns would be
+  imported by accounting software as an extra charge. The PDF carries the totals.
+- **RAMS amended before work starts (29 Oct 2026).** The RAMS sets out how the job will be done and often needs
+  site-specific methods, so a draft can be edited before issue. Scaffold details (name, planned start, planned days,
+  planned crew size, bottom lift) are editable at any time and saving refreshes the draft. A part of the draft
+  (method statement or risk assessment) can be downloaded, adapted in Word and uploaded back: it replaces that part for
+  this scaffold only, records who edited it and when, and gets its own PDF. The firm's standard template is unchanged.
+  Regenerate rebuilds only the parts not edited by hand; Discard edit puts a part back to the standard wording. Issue
+  first brings the standard parts up to date, then checks the job and scaffold records have every required detail
+  (even where the details were typed into an edited part), then locks the pack. After issue, any change is a new
+  revision (rule 7). An edited part is a filled-in document, not a template: dates in it are changed by hand.
 - **RAMS produced before work starts;** the rule 2 gate is unchanged.
 - **RAMS layout:** logo top right then the document name, in a real page header on every page. All templates name the
   logo picture `logo`.
 
 ## Found during the build
-- **Rule 2 vs the RAMS dates.** The RAMS needs the erection date, but rule 2 blocks scheduling the put-up until the RAMS
-  is issued. Resolution: each scaffold has a *planned start date* and *planned days*, which go on the RAMS. Scheduling
-  on the board stays blocked until the RAMS is issued. (Needs Keith's confirmation.)
+- **Rule 2 vs the RAMS dates.** The RAMS needs the erection date and manpower, but rule 2 blocks scheduling the put-up
+  until the RAMS is issued. Resolution: each scaffold has a *planned start date*, *planned days* and *planned crew size*,
+  which go on the RAMS until the put-up is on the board. Scheduling on the board stays blocked until the RAMS is issued.
+  (Needs Keith's confirmation.)
 - **Handover "marked signed" in this build** is the owner recording the client's email or text confirmation, with
   evidence. The certificate says it was confirmed by message and recorded by the firm, never "signed" (rule 5).
 - **The RAMS pack is one record holding two files** (method statement and risk assessment). It is "issued" by the owner
   or office once no required field is empty and a logo is uploaded; after that it can't change (new revision instead).
+- **Edited RAMS uploads have their own check.** Word turns typed email addresses into links by itself, so web and email
+  links are allowed in an edited draft; macros, links to outside files and leftover template tags are refused. Uploaded
+  templates keep the stricter rule (no outside links at all).
 - **CSV export:** one row per line item; VAT is worked on the subtotal and spread across lines so the CSV adds up
   exactly to the PDF.
 - **Numbering is per firm** (JOB0001, Q0001, HC0001, IR0001), so firms can't infer each other's volumes.
 - **Uploaded templates may not contain outside links** (including hyperlinks), as the spec says. Firms may object;
   revisit after testing.
-- **Windows development (29 Oct 2026):** LibreOffice is not on the system path after install, so `api\.env` sets
-  `SOFFICE_PATH`. The conversion now builds its profile address as a proper file URI on every OS (the old form crashed
-  LibreOffice on Windows with "bootstrap.ini is corrupt"), never waits on a prompt, and reports a failed conversion as
-  a 503 with LibreOffice's message. First tested on Windows with real local Supabase: all automated tests pass.
+- **Windows development (29 Oct 2026):** LibreOffice is found in its Windows install folder if it is not on the system
+  path (`SOFFICE_PATH` can still override). The conversion builds its profile address as a proper file URI on every OS
+  (the old form crashed LibreOffice on Windows with "bootstrap.ini is corrupt"), never waits on a prompt, and reports a
+  failed conversion as a 503 with LibreOffice's message. First tested on Windows with real local Supabase.
 - **Pricing and input errors are 422s, not server errors.** "No rate set", "no fixed price" and missing unit prices now
   reach the user as a readable message.
 

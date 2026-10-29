@@ -7,6 +7,8 @@ from . import config, documents as D, quotes as Q, storage, template_checks as T
 from .db import one, all_
 from .fields import APPROVED, INSPECTION_CHECKLIST
 
+RAMS_KINDS = ("method_statement", "risk_assessment")
+
 def d(x):
     if x is None: return ""
     if isinstance(x, dt.datetime): return x.strftime("%d/%m/%Y %H:%M")
@@ -61,6 +63,8 @@ def scaffold_ctx(cur, m, scaffold_id):
     standard = {"tg20_21": "NASC TG20:21", "tg30": "NASC TG30", "bespoke_design": "Bespoke design"}.get(sheet["type"]) if sheet else ""
     start = (put_up["start_date"] if put_up and put_up["start_date"] else None) or s["planned_start_date"]
     days = (put_up["end_date"] - put_up["start_date"]).days + 1 if put_up and put_up["start_date"] and put_up["end_date"] else s["planned_days"]
+    # the crew on the board once the put-up is scheduled; before that, the planned crew size (rule 2 blocks the board)
+    crew = put_up["crew"] if put_up and put_up["crew"] else s.get("planned_crew")
     client = s["client_company"] or s["client_contact"]
     ctx = {**firm_ctx(m),
            "client_name": client, "client_address": s["client_address"] or "",
@@ -74,7 +78,7 @@ def scaffold_ctx(cur, m, scaffold_id):
            "emergency_contact_name": s["emergency_contact_name"] or "", "emergency_contact_phone": s["emergency_contact_phone"] or "",
            "working_days_a": m["working_days_a"], "working_hours_a": m["working_hours_a"],
            "working_days_b": m["working_days_b"], "working_hours_b": m["working_hours_b"],
-           "manpower": str(put_up["crew"]) if put_up and put_up["crew"] else "",
+           "manpower": str(crew) if crew else "",
            "prepared_by_name": m["full_name"], "prepared_by_signature": "",
            "scaffold_type": (sheet["scaffold_type"] if sheet and sheet.get("scaffold_type") else ""),
            "loading_class": sheet["load_class"] if sheet and sheet.get("load_class") else "",
@@ -84,24 +88,41 @@ def scaffold_ctx(cur, m, scaffold_id):
     return s, ctx
 
 # ---------- RAMS ----------
-def generate_rams(cur, scaffold_id):
+def rams_missing(ctx, has_logo: bool) -> list[str]:
+    """Checked against the job and scaffold records, even for parts edited by hand, so the record and the paper agree."""
+    missing = set()
+    for kind in RAMS_KINDS:
+        missing.update(D.missing_required(kind, ctx, logo_present=has_logo))
+    return sorted(missing)
+
+def generate_rams(cur, scaffold_id, discard: str | None = None):
+    """Builds or refreshes the draft RAMS pack. On an existing draft, a part edited by hand is kept as written unless
+    that part is being discarded; every other part is filled fresh from the firm's template. An issued pack is never
+    touched: generating after issue starts the next revision."""
+    if discard is not None and discard not in RAMS_KINDS: raise HTTPException(422, "Unknown document.")
     m = me(cur); s, ctx = scaffold_ctx(cur, m, scaffold_id); logo = logo_png(m)
     current = one(cur, "select * from compliance_docs where scaffold_id = %s and type = 'rams' order by revision_no desc limit 1", scaffold_id)
+    draft = current if current and not current["issued_at"] else None
     rev = 0 if not current else (current["revision_no"] + 1 if current["issued_at"] else current["revision_no"])
-    files, missing, used = {}, set(), []
-    for kind in ("method_statement", "risk_assessment"):
+    old_files = (draft["files"] or {}) if draft else {}
+    files, used, kept = {}, [], []
+    for kind in RAMS_KINDS:
+        prev = old_files.get(kind) or {}
+        if prev.get("edited_by") and kind != discard:
+            files[kind] = prev; kept.append(kind); continue
         trow, tbytes = template(cur, m, kind)
         out = D.render(tbytes, ctx, logo)
         files[kind] = store_doc(m, scaffold_id, f"rams-r{rev}-{kind}", out)
-        missing.update(D.missing_required(kind, ctx, logo_present=bool(logo)))
         used.append({"kind": kind, "template_id": str(trow["id"]), "version": trow["version"]})
-    missing = sorted(missing)
-    if current and not current["issued_at"]:
+    missing = rams_missing(ctx, bool(logo))
+    if draft:
+        tid = used[0]["template_id"] if used else draft["template_id"]
+        tver = used[0]["version"] if used else draft["template_version"]
         cur.execute("""update compliance_docs set files = %s, missing_fields = %s, docx_path = %s, pdf_path = %s,
                        template_id = %s, template_version = %s where id = %s""",
                     (json.dumps(files), missing, files["method_statement"]["docx"], files["method_statement"]["pdf"],
-                     used[0]["template_id"], used[0]["version"], current["id"]))
-        doc_id = current["id"]
+                     tid, tver, draft["id"]))
+        doc_id = draft["id"]
     else:
         doc_id = one(cur, """insert into compliance_docs (company_id, scaffold_id, type, revision_no, files, missing_fields,
                              docx_path, pdf_path, template_id, template_version, reference)
@@ -111,16 +132,41 @@ def generate_rams(cur, scaffold_id):
                      f"{s['reference']}-RAMS-R{rev}")["id"]
     if s["status"] == "planned":
         cur.execute("update scaffolds set status = 'rams_raised' where id = %s", (scaffold_id,))
-    return {"doc_id": str(doc_id), "revision": rev, "files": files, "missing": missing, "templates": used}
+    return {"doc_id": str(doc_id), "revision": rev, "files": files, "missing": missing, "templates": used, "kept": kept}
+
+def upload_rams_edit(cur, scaffold_id, kind, filename, data):
+    """A part of the draft adapted to the site in Word. Replaces that part for this scaffold only; the firm's
+    template is unchanged. Only a draft can take an edit: an issued pack is locked (rule 7)."""
+    if kind not in RAMS_KINDS: raise HTTPException(422, "Choose the method statement or the risk assessment.")
+    r = T.check_edited_document(filename, data)
+    if not r.ok: raise HTTPException(422, " ".join(r.errors))
+    m = me(cur)
+    draft = one(cur, """select * from compliance_docs where scaffold_id = %s and type = 'rams' and issued_at is null
+                        order by revision_no desc limit 1""", scaffold_id)
+    if not draft:
+        raise HTTPException(409, "There is no draft to edit. Generate the RAMS pack first, or start a new revision of the issued one.")
+    s, ctx = scaffold_ctx(cur, m, scaffold_id)
+    stored = store_doc(m, scaffold_id, f"rams-r{draft['revision_no']}-{kind}-edited-{uuid.uuid4().hex[:6]}", data)
+    files = dict(draft["files"] or {})
+    files[kind] = {**stored, "edited_by": m["full_name"], "edited_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                   "original_name": filename[:120]}
+    missing = rams_missing(ctx, bool(m["logo_path"]))
+    ms = files.get("method_statement") or {}
+    cur.execute("update compliance_docs set files = %s, missing_fields = %s, docx_path = %s, pdf_path = %s where id = %s",
+                (json.dumps(files), missing, ms.get("docx"), ms.get("pdf"), draft["id"]))
+    return {"doc_id": str(draft["id"]), "kind": kind, "files": files, "missing": missing}
 
 def issue_rams(cur, scaffold_id):
+    """Brings the standard parts up to date with the current job and scaffold details (edited parts are kept as
+    written), checks nothing is missing, then locks the pack."""
     doc = one(cur, """select * from compliance_docs where scaffold_id = %s and type = 'rams' and issued_at is null
                       order by revision_no desc limit 1""", scaffold_id)
     if not doc: raise HTTPException(409, "Generate the RAMS pack first.")
-    if doc["missing_fields"]:
-        raise HTTPException(409, "Fill these before issuing: " + ", ".join(doc["missing_fields"]))
+    g = generate_rams(cur, scaffold_id)
+    if g["missing"]:
+        raise HTTPException(409, "Fill these before issuing: " + ", ".join(g["missing"]))
     cur.execute("update compliance_docs set issued_at = now(), issued_by = auth.uid() where id = %s", (doc["id"],))
-    return {"doc_id": str(doc["id"]), "issued": True}
+    return {"doc_id": str(doc["id"]), "issued": True, "kept": g["kept"]}
 
 def record_sheet(cur, scaffold_id, body):
     m = me(cur)

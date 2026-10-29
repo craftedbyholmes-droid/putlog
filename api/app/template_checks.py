@@ -1,4 +1,5 @@
-"""Checks on an uploaded Word template (untrusted input) and label detection for untagged documents."""
+"""Checks on an uploaded Word template (untrusted input), on a RAMS draft edited by hand, and label detection
+for untagged documents."""
 import copy, io, re, zipfile
 from dataclasses import dataclass, field
 from .fields import APPROVED, CORE
@@ -6,6 +7,7 @@ from .fields import APPROVED, CORE
 MAX_BYTES = 10 * 1024 * 1024
 TAG = re.compile(r"(\{\{.*?\}\}|\{%.*?%\}|\{#.*?#\})", re.S)
 PLAIN = re.compile(r"^\{\{\s*([a-z_][a-z0-9_]*)\s*\}\}$")
+HYPERLINK_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
 
 @dataclass
 class Report:
@@ -62,6 +64,42 @@ def check_upload(filename: str, data: bytes) -> Report:
     if not re.search(rb'<pic:cNvPr[^>]*\bname="logo"', b"".join(z.read(n) for n in _parts(z))):
         r.warnings.append("No picture named \"logo\" was found, so your firm logo will not appear. "
                           "In Word, right-click your logo, choose Edit Alt Text, and set its name to logo.")
+    return r
+
+def check_edited_document(filename: str, data: bytes) -> Report:
+    """A RAMS draft that someone downloaded, adapted to the site in Word, and uploaded back. It is not a template:
+    it is stored and converted, never filled, so tags are refused (they would print as-is). Ordinary web and email
+    links are allowed because Word adds them by itself; macros and links to outside files are not."""
+    r = Report()
+    if not filename.lower().endswith(".docx"):
+        r.errors.append(f"{filename} is not a .docx file. Save it from Word as a .docx (Word Document) and upload again."); return r
+    if len(data) > MAX_BYTES:
+        r.errors.append(f"The file is {len(data)/1048576:.1f} MB. The limit is {MAX_BYTES//1048576} MB."); return r
+    try:
+        z = zipfile.ZipFile(io.BytesIO(data))
+        names = z.namelist()
+        ct = z.read("[Content_Types].xml").decode("utf8", "ignore")
+        z.read("word/document.xml")
+    except Exception:
+        r.errors.append("The file is damaged or is not a real Word document."); return r
+    if any("vbaproject" in n.lower() for n in names) or "macroEnabled" in ct:
+        r.errors.append("The document contains macros. Save a copy as a plain .docx (not .docm) and upload that.")
+    for n in names:
+        if not n.endswith(".rels"):
+            continue
+        for rel in re.findall(r"<Relationship\b[^>]*>", z.read(n).decode("utf8", "ignore")):
+            if 'TargetMode="External"' not in rel:
+                continue
+            typ = re.search(r'Type="([^"]+)"', rel); tgt = re.search(r'Target="([^"]+)"', rel)
+            target = tgt.group(1) if tgt else "unknown"
+            if typ and typ.group(1) == HYPERLINK_REL and re.match(r"(?i)(https?:|mailto:)", target):
+                continue
+            r.errors.append(f"The document links to an outside file ({target}). Remove the link and upload again.")
+    for n in _parts(z):
+        if any(TAG.search(t) or "{{" in t for t in _paragraph_texts(z.read(n).decode("utf8", "ignore"))):
+            r.errors.append("The document still contains template tags such as {{ client_name }}. Upload the filled-in "
+                            "draft you downloaded from the scaffold, not a template.")
+            break
     return r
 
 # ---------- label detection for documents with blanks instead of tags ----------

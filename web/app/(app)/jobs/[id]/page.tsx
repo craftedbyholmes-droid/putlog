@@ -1,5 +1,6 @@
 "use client";
 import { use, useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import { api, download } from "@/lib/api";
 import { Badge, Button, Card, CardHeader, Empty, Field, Input, Modal, Notice, Select } from "@/components/ui";
@@ -9,8 +10,11 @@ import { HakiResult } from "@/components/HakiResult";
 
 type Msg = { ok: boolean; text: string } | null;
 const STATUS_TONE: Record<string, any> = { planned: "slate", rams_raised: "violet", erecting: "blue", on_hire: "green", dismantle_requested: "amber", dismantling: "amber", dismantled: "slate" };
+const DOC_NAMES: Record<string, string> = { method_statement: "Method statement", risk_assessment: "Risk assessment", handover: "Handover certificate", inspection: "Inspection report" };
+const RAMS_PARTS = ["method_statement", "risk_assessment"];
 // Stable keys for fixed-price items. Not crypto.randomUUID: that is missing on plain http (a phone on the local network).
 const newId = () => Math.random().toString(36).slice(2, 10);
+const wholeOrNull = (v: any) => (v === "" || v == null ? null : Number(v));
 
 export default function JobPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -54,6 +58,7 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
           <Field label="Emergency phone"><Input defaultValue={job.emergency_contact_phone ?? ""} inputMode="tel" onBlur={(e) => saveJob({ emergency_contact_phone: e.target.value })} /></Field>
           <Field label="Hire clock starts on"><Select value={job.hire_start_trigger} onChange={(e) => saveJob({ hire_start_trigger: e.target.value })}><option value="job_up_confirmed">Job up confirmed</option><option value="handover_emailed">Handover emailed</option></Select></Field>
         </div>
+        <p className="px-4 pb-3 text-xs text-slate-500">Changed the supervisor or emergency contact? Click Regenerate on each draft RAMS. Issuing does it for you.</p>
       </Card>
 
       {(job.sites ?? []).map((site: any) => (
@@ -75,10 +80,10 @@ export default function JobPage({ params }: { params: Promise<{ id: string }> })
           const gross = q.vat_registered ? net * (1 + Number(q.vat_rate) / 100) : net;
           return (
             <div key={q.id} className="flex flex-wrap items-center justify-between gap-2 p-3 text-sm">
-              <div><span className="font-medium">{q.number}</span> · {ukDate(q.issued_at)} · {gbp(Math.round(gross * 100) / 100)}{q.vat_registered ? " inc. VAT" : ""}</div>
+              <div><Link href={`/quotes/${q.id}`} className="font-medium hover:underline">{q.number}</Link> · {ukDate(q.issued_at)} · {gbp(Math.round(gross * 100) / 100)}{q.vat_registered ? " inc. VAT" : ""}</div>
               <div className="flex gap-2"><Button size="sm" variant="secondary" onClick={() => download(`/quotes/${q.id}/pdf`, `${q.number}.pdf`).catch((e) => setMsg({ ok: false, text: e.message }))}>PDF</Button>
-                <Button size="sm" variant="secondary" onClick={() => download(`/quotes/${q.id}/docx`, `${q.number}.docx`)}>Word</Button>
-                <Button size="sm" variant="secondary" onClick={() => download(`/quotes/${q.id}/csv`, `${q.number}.csv`)}>CSV</Button></div>
+                <Button size="sm" variant="secondary" onClick={() => download(`/quotes/${q.id}/docx`, `${q.number}.docx`).catch((e) => setMsg({ ok: false, text: e.message }))}>Word</Button>
+                <Button size="sm" variant="secondary" onClick={() => download(`/quotes/${q.id}/csv`, `${q.number}.csv`).catch((e) => setMsg({ ok: false, text: e.message }))}>CSV</Button></div>
             </div>); })}
         </div>
       </Card>
@@ -96,10 +101,12 @@ function NewSiteModal({ jobId, companyId, onClose, onSaved }: any) {
 }
 
 function NewScaffoldModal({ siteId, companyId, onClose, onSaved }: any) {
-  const [f, setF] = useState<any>({ name: "", kind: "tube_fitting", pricing_mode: "squareage", fixed_price: "", first_lift_m: 2.0, lift_m: 2.0, item_no: 1, planned_start_date: "", planned_days: "" });
+  const [f, setF] = useState<any>({ name: "", kind: "tube_fitting", pricing_mode: "squareage", fixed_price: "", first_lift_m: 2.0, lift_m: 2.0, item_no: 1, planned_start_date: "", planned_days: "", planned_crew: "" });
   useEffect(() => { (async () => { const { data } = await supabase().from("companies").select("default_first_lift_m").eq("id", companyId).single(); if (data) setF((x: any) => ({ ...x, first_lift_m: Number(data.default_first_lift_m) })); })(); }, [companyId]);
   const save = async () => {
     if (!f.name.trim()) return alert("Give the scaffold a name, e.g. Front elevation.");
+    const days = wholeOrNull(f.planned_days), crew = wholeOrNull(f.planned_crew);
+    if ((days !== null && (!Number.isInteger(days) || days < 1)) || (crew !== null && (!Number.isInteger(crew) || crew < 1))) return alert("Planned days and crew size must be whole numbers, 1 or more.");
     let price_items: any[] = [];
     if (f.pricing_mode === "fixed") {
       const p = Number(f.fixed_price);
@@ -107,7 +114,7 @@ function NewScaffoldModal({ siteId, companyId, onClose, onSaved }: any) {
       price_items = [{ id: newId(), description: "Scaffold as quoted", price: p }];
     }
     const { fixed_price, ...rest } = f;
-    const row = { ...rest, price_items, site_id: siteId, company_id: companyId, planned_start_date: f.planned_start_date || null, planned_days: f.planned_days || null };
+    const row = { ...rest, price_items, site_id: siteId, company_id: companyId, planned_start_date: f.planned_start_date || null, planned_days: days, planned_crew: crew };
     const { error } = await supabase().from("scaffolds").insert(row); if (error) alert(error.message); else onSaved();
   };
   const tower = f.kind === "haki_stair_tower";
@@ -125,8 +132,40 @@ function NewScaffoldModal({ siteId, companyId, onClose, onSaved }: any) {
         {!tower && <FirstLift value={f.first_lift_m} onChange={(v) => setF({ ...f, first_lift_m: v })} />}
         <Field label="Planned start (for the RAMS)"><Input type="date" value={f.planned_start_date} onChange={(e) => setF({ ...f, planned_start_date: e.target.value })} /></Field>
         <Field label="Planned days to erect"><Input inputMode="numeric" value={f.planned_days} onChange={(e) => setF({ ...f, planned_days: e.target.value })} /></Field>
+        <Field label="Planned crew size" hint="Goes on the RAMS as manpower until the put-up is on the board."><Input inputMode="numeric" value={f.planned_crew} onChange={(e) => setF({ ...f, planned_crew: e.target.value })} /></Field>
       </div>
       <div className="mt-4 flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button onClick={save}>Save scaffold</Button></div>
+    </Modal>
+  );
+}
+
+function EditScaffoldModal({ s, onClose, onSaved }: any) {
+  const tower = s.kind === "haki_stair_tower";
+  const [f, setF] = useState<any>({ name: s.name, planned_start_date: s.planned_start_date ?? "", planned_days: s.planned_days ?? "", planned_crew: s.planned_crew ?? "", first_lift_m: Number(s.first_lift_m) });
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    if (!String(f.name).trim()) return alert("Give the scaffold a name, e.g. Front elevation.");
+    const days = wholeOrNull(f.planned_days), crew = wholeOrNull(f.planned_crew);
+    if ((days !== null && (!Number.isInteger(days) || days < 1)) || (crew !== null && (!Number.isInteger(crew) || crew < 1))) return alert("Planned days and crew size must be whole numbers, 1 or more.");
+    setBusy(true);
+    const patch: any = { name: String(f.name).trim(), planned_start_date: f.planned_start_date || null, planned_days: days, planned_crew: crew };
+    if (!tower) patch.first_lift_m = f.first_lift_m;
+    const { error } = await supabase().from("scaffolds").update(patch).eq("id", s.id);
+    setBusy(false);
+    if (error) return alert(error.message);
+    onSaved();
+  };
+  return (
+    <Modal open onClose={onClose} title={`Edit ${s.name}`} wide>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label="Name / work area"><Input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></Field>
+        {!tower && <FirstLift value={f.first_lift_m} onChange={(v) => setF({ ...f, first_lift_m: v })} />}
+        <Field label="Planned start (for the RAMS)"><Input type="date" value={f.planned_start_date} onChange={(e) => setF({ ...f, planned_start_date: e.target.value })} /></Field>
+        <Field label="Planned days to erect"><Input inputMode="numeric" value={f.planned_days} onChange={(e) => setF({ ...f, planned_days: e.target.value })} /></Field>
+        <Field label="Planned crew size" hint="Goes on the RAMS as manpower until the put-up is on the board."><Input inputMode="numeric" value={f.planned_crew} onChange={(e) => setF({ ...f, planned_crew: e.target.value })} /></Field>
+      </div>
+      <p className="mt-3 text-xs text-slate-500">Saving updates a draft RAMS straight away. Parts you edited in Word are kept as you wrote them, so change these details in them by hand if they appear there. An issued RAMS never changes: start a new revision instead.</p>
+      <div className="mt-4 flex justify-end gap-2"><Button variant="secondary" onClick={onClose}>Cancel</Button><Button onClick={save} disabled={busy}>{busy ? "Saving…" : "Save"}</Button></div>
     </Modal>
   );
 }
@@ -144,19 +183,31 @@ function FirstLift({ value, onChange }: { value: number; onChange: (v: number) =
 }
 
 function ScaffoldPanel({ s, docs, isOwner, companyId, onMsg, reload }: any) {
-  const [modal, setModal] = useState<"" | "sheet" | "erect" | "inspect" | "signed">("");
+  const [modal, setModal] = useState<"" | "sheet" | "erect" | "inspect" | "signed" | "edit">("");
   const [busy, setBusy] = useState(false);
   const act = async (fn: () => Promise<any>, ok: (r: any) => string) => { setBusy(true); try { const r = await fn(); onMsg({ ok: true, text: ok(r) }); reload(); } catch (e: any) { onMsg({ ok: false, text: e.message }); } setBusy(false); };
   const rams = docs.filter((d: any) => d.type === "rams").sort((a: any, b: any) => b.revision_no - a.revision_no)[0];
+  const draft = rams && !rams.issued_at ? rams : null;
   const sheet = docs.find((d: any) => ["tg20_21", "tg30", "bespoke_design"].includes(d.type));
   const pendingHandover = docs.find((d: any) => d.type === "handover" && (Array.isArray(d.handovers) ? d.handovers[0] : d.handovers)?.signature_status === "pending");
   const tower = s.kind === "haki_stair_tower";
   const fixed = s.pricing_mode === "fixed";
+  const keptText = (r: any) => (r?.kept?.length ? `. Your edited ${r.kept.map((k: string) => DOC_NAMES[k].toLowerCase()).join(" and ")} kept as you wrote it.` : ".");
+  const refreshDraft = (lead: string) => act(() => api(`/scaffolds/${s.id}/rams`, { method: "POST" }), (r) => `${lead} The draft RAMS has been updated${keptText(r)}`);
+  const afterEdit = () => {
+    setModal("");
+    if (draft) return refreshDraft("Details saved.");
+    onMsg({ ok: true, text: rams?.issued_at ? "Details saved. The issued RAMS still shows the old details: click New revision if the change affects it." : "Details saved." });
+    reload();
+  };
+  const uploadEdited = (kind: string, file: File) => act(async () => { const fd = new FormData(); fd.append("kind", kind); fd.append("file", file); return api(`/scaffolds/${s.id}/rams/edited`, { method: "POST", body: fd }); },
+    (r) => `Edited ${DOC_NAMES[kind].toLowerCase()} saved for this scaffold.` + (r.missing.length ? ` Still to fill before issue: ${r.missing.join(", ")}.` : " Ready to issue."));
+  const discardEdit = (kind: string) => { if (!confirm(`Put the ${DOC_NAMES[kind].toLowerCase()} back to the standard wording? Your edits to it will be lost.`)) return; act(() => api(`/scaffolds/${s.id}/rams/discard-edit`, { method: "POST", body: JSON.stringify({ kind }) }), () => `${DOC_NAMES[kind]} put back to the standard wording, filled in fresh.`); };
   return (
     <div className="rounded-lg border">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-slate-50 px-3 py-2">
         <div className="flex flex-wrap items-center gap-2"><span className="font-semibold">{s.name}</span><Badge tone={STATUS_TONE[s.status]}>{s.status.replace("_", " ")}</Badge><Badge tone={tower ? "violet" : "slate"}>{tower ? "HAKI tower" : "Tube & fitting"}</Badge>{fixed && <Badge tone="amber">Fixed price</Badge>}{pendingHandover && <Badge tone="red">Handover unsigned</Badge>}</div>
-        <div className="text-xs text-slate-500">{tower ? "" : `Bottom lift ${s.first_lift_m} m (${ftIn(Number(s.first_lift_m) * 1000)})`}{s.planned_start_date ? ` · planned ${ukDate(s.planned_start_date)}` : ""}</div>
+        <div className="flex items-center gap-2 text-xs text-slate-500"><span>{tower ? "" : `Bottom lift ${s.first_lift_m} m (${ftIn(Number(s.first_lift_m) * 1000)})`}{s.planned_start_date ? ` · planned ${ukDate(s.planned_start_date)}` : " · no planned start"}{s.planned_crew ? ` · crew ${s.planned_crew}` : ""}</span><Button size="sm" variant="ghost" onClick={() => setModal("edit")}>Edit</Button></div>
       </div>
       <div className="grid gap-4 p-3 lg:grid-cols-2">
         <div className="space-y-4">{fixed && <FixedPrice s={s} onMsg={onMsg} reload={reload} />}{tower ? <HakiPanel s={s} onMsg={onMsg} reload={reload} /> : <Elevations s={s} companyId={companyId} reload={reload} />}</div>
@@ -165,20 +216,23 @@ function ScaffoldPanel({ s, docs, isOwner, companyId, onMsg, reload }: any) {
           <ol className="space-y-2 text-sm">
             <Step done={!!sheet} label={sheet ? `${sheet.type === "bespoke_design" ? "Bespoke design" : sheet.type === "tg30" ? "TG30 sheet" : "TG20:21 sheet"} ${sheet.reference ?? ""}` : "Compliance sheet or bespoke design"} action={!sheet && <Button size="sm" variant="secondary" onClick={() => setModal("sheet")}>Record</Button>} />
             <Step done={!!rams} label={rams ? `RAMS pack revision ${rams.revision_no}${rams.issued_at ? `, issued ${ukDate(rams.issued_at)}` : " (draft)"}` : "RAMS pack"} action={
-              <div className="flex gap-1"><Button size="sm" variant="secondary" disabled={busy} onClick={() => act(() => api(`/scaffolds/${s.id}/rams`, { method: "POST" }), (r) => `RAMS revision ${r.revision} generated.` + (r.missing.length ? ` Fill before issue: ${r.missing.join(", ")}.` : " Ready to issue."))}>{rams ? (rams.issued_at ? "New revision" : "Regenerate") : "Generate"}</Button>
-                {rams && !rams.issued_at && <Button size="sm" disabled={busy || rams.missing_fields?.length > 0} onClick={() => act(() => api(`/scaffolds/${s.id}/rams/issue`, { method: "POST" }), () => "RAMS issued. It can no longer be changed; changes need a new revision.")}>Issue</Button>}</div>} />
-            {rams?.missing_fields?.length > 0 && !rams.issued_at && <li className="ml-6 text-xs text-amber-700">Empty before issue: {rams.missing_fields.join(", ")}</li>}
+              <div className="flex gap-1"><Button size="sm" variant="secondary" disabled={busy} onClick={() => act(() => api(`/scaffolds/${s.id}/rams`, { method: "POST" }), (r) => `RAMS revision ${r.revision} ${draft ? "updated" : "generated"}${keptText(r)}` + (r.missing.length ? ` Fill before issue: ${r.missing.join(", ")}.` : " Ready to issue."))}>{rams ? (rams.issued_at ? "New revision" : "Regenerate") : "Generate"}</Button>
+                {draft && <Button size="sm" disabled={busy || draft.missing_fields?.length > 0} onClick={() => act(() => api(`/scaffolds/${s.id}/rams/issue`, { method: "POST" }), () => "RAMS issued. It can no longer be changed; changes need a new revision.")}>Issue</Button>}</div>} />
+            {draft?.missing_fields?.length > 0 && <li className="ml-6 text-xs text-amber-700">Empty before issue: {draft.missing_fields.join(", ")}. Most come from Edit (planned start, crew) and the compliance sheet.</li>}
+            {draft && <li className="ml-6 text-xs text-slate-500">Site-specific methods: download the Word file below, edit it, then Upload edited. Regenerate keeps any part you edited.</li>}
             <Step done={["on_hire", "dismantle_requested", "dismantling", "dismantled"].includes(s.status)} label={s.erected_at ? `Erected ${ukDate(s.erected_at)}` : "Confirm erected"} action={!s.erected_at && <Button size="sm" onClick={() => setModal("erect")}>Confirm erected</Button>} />
             {pendingHandover && <li className="ml-6 flex flex-wrap items-center gap-2 text-xs text-red-700">Handover {pendingHandover.reference} is not signed.{isOwner && <Button size="sm" variant="secondary" onClick={() => setModal("signed")}>Record client confirmation</Button>}</li>}
             {s.erected_at && <Step done={false} label="Inspection report" action={<Button size="sm" variant="secondary" onClick={() => setModal("inspect")}>New inspection</Button>} />}
           </ol>
-          <DocList docs={docs} />
+          {busy && <p className="text-xs text-slate-500">Working… making the Word and PDF files can take up to half a minute.</p>}
+          <DocList docs={docs} busy={busy} onUpload={uploadEdited} onDiscard={discardEdit} />
         </div>
       </div>
-      {modal === "sheet" && <SheetModal scaffoldId={s.id} open onClose={() => setModal("")} onDone={(m) => { onMsg(m); reload(); }} />}
+      {modal === "sheet" && <SheetModal scaffoldId={s.id} open onClose={() => setModal("")} onDone={(m) => { if (m.ok && draft) refreshDraft(m.text); else { onMsg(m); reload(); } }} />}
       {modal === "erect" && <ConfirmErectedModal scaffoldId={s.id} open onClose={() => setModal("")} onDone={(m) => { onMsg(m); reload(); }} />}
       {modal === "inspect" && <InspectionModal scaffoldId={s.id} open onClose={() => setModal("")} onDone={(m) => { onMsg(m); reload(); }} />}
       {modal === "signed" && pendingHandover && <SignedModal docId={pendingHandover.id} onClose={() => setModal("")} onDone={(m: any) => { onMsg(m); reload(); }} />}
+      {modal === "edit" && <EditScaffoldModal s={s} onClose={() => setModal("")} onSaved={afterEdit} />}
     </div>
   );
 }
@@ -187,17 +241,21 @@ function Step({ done, label, action }: { done: boolean; label: string; action?: 
   return <li className="flex flex-wrap items-center justify-between gap-2"><span className="flex items-center gap-2"><span className={cn("flex h-5 w-5 items-center justify-center rounded-full text-[11px] text-white", done ? "bg-green-600" : "bg-slate-300")}>{done ? "✓" : ""}</span>{label}</span>{action}</li>;
 }
 
-function DocList({ docs }: { docs: any[] }) {
+function DocList({ docs, busy, onUpload, onDiscard }: { docs: any[]; busy?: boolean; onUpload?: (kind: string, f: File) => void; onDiscard?: (kind: string) => void }) {
   const files = docs.flatMap((d: any) => Object.entries(d.files ?? {}).map(([k, v]: any) => ({ d, k, v })));
   if (!files.length) return null;
-  const names: Record<string, string> = { method_statement: "Method statement", risk_assessment: "Risk assessment", handover: "Handover certificate", inspection: "Inspection report" };
   return (
     <div className="rounded-md border"><div className="border-b px-3 py-1.5 text-xs font-semibold text-slate-600">Documents</div>
-      {files.map(({ d, k, v }, i) => (
-        <div key={i} className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 text-xs">
-          <span>{names[k] ?? k} · {d.reference ?? ""}{d.type === "rams" ? ` r${d.revision_no}` : ""}{d.issued_at ? " · issued" : " · draft"}</span>
-          <span className="flex gap-1">{v.pdf && <Button size="sm" variant="ghost" onClick={() => download(`/files?path=${encodeURIComponent(v.pdf)}`, v.pdf.split("/").pop())}>PDF</Button>}<Button size="sm" variant="ghost" onClick={() => download(`/files?path=${encodeURIComponent(v.docx)}`, v.docx.split("/").pop())}>Word</Button></span>
-        </div>))}
+      {files.map(({ d, k, v }, i) => {
+        const editable = d.type === "rams" && !d.issued_at && RAMS_PARTS.includes(k);
+        return (
+          <div key={i} className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 text-xs">
+            <span className="flex flex-wrap items-center gap-1">{DOC_NAMES[k] ?? k} · {d.reference ?? ""}{d.type === "rams" ? ` r${d.revision_no}` : ""}{d.issued_at ? " · issued" : " · draft"}{v.edited_by && <Badge tone="amber">edited by {v.edited_by}, {ukDate(v.edited_at)}</Badge>}</span>
+            <span className="flex flex-wrap gap-1">{v.pdf && <Button size="sm" variant="ghost" onClick={() => download(`/files?path=${encodeURIComponent(v.pdf)}`, v.pdf.split("/").pop())}>PDF</Button>}<Button size="sm" variant="ghost" onClick={() => download(`/files?path=${encodeURIComponent(v.docx)}`, v.docx.split("/").pop())}>Word</Button>
+              {editable && onUpload && <label className={cn("inline-flex min-h-8 cursor-pointer items-center rounded-md px-3 text-xs font-medium text-slate-700 hover:bg-slate-100", busy && "pointer-events-none opacity-50")}>Upload edited<input type="file" accept=".docx" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) onUpload(k, f); }} /></label>}
+              {editable && v.edited_by && onDiscard && <Button size="sm" variant="ghost" disabled={busy} onClick={() => onDiscard(k)}>Discard edit</Button>}</span>
+          </div>);
+      })}
     </div>
   );
 }

@@ -68,8 +68,23 @@ def missing_required(kind: str, context: dict, *, logo_present: bool = True) -> 
 class PdfConversionError(RuntimeError):
     """LibreOffice is installed but this conversion failed or timed out."""
 
+# Where the Windows installer puts LibreOffice. It does not add itself to the system path, so look here too.
+WINDOWS_DEFAULTS = [r"C:\Program Files\LibreOffice\program\soffice.exe",
+                    r"C:\Program Files (x86)\LibreOffice\program\soffice.exe"]
+
 def soffice_path() -> str | None:
-    return os.environ.get("SOFFICE_PATH") or shutil.which("soffice") or shutil.which("libreoffice")
+    """SOFFICE_PATH if set and real, then the system path (Railway's Docker image), then the Windows install folder."""
+    env = os.environ.get("SOFFICE_PATH")
+    if env and os.path.exists(env):
+        return env
+    found = shutil.which("soffice") or shutil.which("libreoffice")
+    if found:
+        return found
+    if os.name == "nt":
+        for p in WINDOWS_DEFAULTS:
+            if os.path.exists(p):
+                return p
+    return None
 
 def to_pdf(docx_bytes: bytes, timeout: int = 120) -> bytes | None:
     exe = soffice_path()

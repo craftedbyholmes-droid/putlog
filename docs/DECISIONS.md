@@ -42,19 +42,50 @@ These amend "Scaffolding CRM — Agreed Spec & Build Handoff". Fold them into th
   and issued. Rule 2 is unchanged: scheduling and erection stay blocked until a real drawing ref is recorded. A RAMS
   signed before the drawing ref was recorded is flagged on the scaffold for a new revision that cites it.
 - **Saved signatures (29 Oct 2026).** Each person saves their own signature (drawn, or a photo on white paper, cleaned
-  to a see-through background) and sets a 4–6 digit signing PIN in Settings. A signature is only ever applied by that
-  person's own deliberate tap on a button labelled as their legal signature. RAMS: "Sign and issue", by the owner or
-  anyone the owner ticks, with the PIN; the signature goes in the signature box and a dated "Signed electronically"
-  block (name, position, UK time, how it was applied) ends every part, including parts edited by hand. Inspection
-  report: signed by the inspector who did it (competent-inspector flag), with the PIN; it is issued and locked once
-  signed, and missing details are listed before signing. Handover certificate: signed by the person confirming erection,
-  one tap, no PIN, as the spec allows; the issuer is recorded on the certificate so a later re-render never names
-  someone else. PINs are hashed in the private schema the website cannot reach; five wrong tries lock signing for 15
-  minutes; changing a PIN needs the current one; the owner can reset a forgotten PIN. Signature images sit in a private
-  bucket and are only read server-side. **The statement and button wording are draft, for the solicitor to review.**
+  to a see-through background) and sets a 4–6 digit signing PIN in Settings, while signed in as themselves: nobody can
+  save or choose a signature for someone else. A signature is only ever applied by that person's own deliberate tap on
+  a button labelled as their legal signature. RAMS: "Sign and issue", by the owner or anyone the owner ticks, with the
+  PIN; the signature goes in the signature box and a dated "Signed electronically" block (name, position, UK time, how
+  it was applied) ends every part, including parts edited by hand. Inspection report: signed by the inspector who did
+  it (competent-inspector flag), with the PIN; it is issued and locked once signed, and missing details are listed
+  before signing. Handover certificate: signed by the person confirming erection, one tap, no PIN, as the spec allows;
+  the issuer is recorded on the certificate so a later re-render never names someone else. PINs are hashed in the
+  private schema the website cannot reach; five wrong tries lock signing for 15 minutes; changing a PIN needs the
+  current one; the owner can reset a forgotten PIN. Signature images sit in a private bucket and are only read
+  server-side. Size and position in the signed PDF checked and approved by Keith. **The statement and button wording
+  are draft, for the solicitor to review.**
 - **RAMS produced before work starts;** the rule 2 gate is unchanged.
 - **RAMS layout:** logo top right then the document name, in a real page header on every page. All templates name the
   logo picture `logo`.
+
+## Monetisation (confirmed by Keith, 29 Oct 2026)
+Replaces the spec's Open pricing item (Basic £19.99 / Full £24.99).
+- **Basic tier: £35.99 a month per firm, 3 logins included** (enough for an owner, an inspector and an office member).
+  Sits just under Graft's £41 entry tier while doing far more.
+- **Extra office or inspector logins: £8 a month each** beyond the 3.
+- **Gang and charge-hand (gang portal) logins are free and unlimited.** Charging for them would push firms to share
+  logins, which breaks rule 8 (one account per person) and makes signatures impossible to attribute. A site inspector on
+  a gang login with the competent-inspector flag signs inspections at no charge; that is intended. The gang role sees no
+  prices and only its assigned job, so office work can't be moved onto free logins.
+- **Billing periods: monthly, plus annual with 2 months free** (annual Basic £359.90).
+- **Free trial: 30 days, card taken upfront.** A countdown of the days left shows in the app throughout the trial, with
+  a prominent "Cancel subscription" button.
+- **When a payment fails and Stripe's retries run out, the firm goes read-only:** every past record (RAMS, inspection
+  reports, handover certificates, quotes) stays viewable and exportable, but nothing new can be created. A firm must
+  always be able to produce its signed safety paperwork for the HSE or a principal contractor.
+- Self-service card changes, plan changes and cancellation go through Stripe's customer portal.
+- Tier limits are enforced by the API and the database, never only by hiding buttons.
+
+### Monetisation, still open
+- **Full tier:** its price and what it adds (the client portal is the spec's candidate).
+- **Annual price for extra logins** (proposed default: the same 2 months free, £80 a year each).
+- **VAT:** whether Ceilte Ltd is VAT-registered, and so whether prices are shown plus VAT.
+- **Trial reminder email 7 days before the first charge** (recommended, to avoid disputes and chargebacks): needs
+  transactional email (Postmark), not yet built. Until then the in-app countdown covers it.
+- **How long read-only data is kept after a firm stops paying** (for example 6 years, in line with how long safety
+  records are commonly kept), and how that is told to the firm. Check retention against the HSE's expectations.
+- **Firm self sign-up** (create firm and owner login, then Stripe Checkout) and **inviting people** to a firm are both
+  still to build; today logins exist only in the demo data.
 
 ## Found during the build
 - **Rule 2 vs the RAMS dates.** The RAMS needs the erection date and manpower, but rule 2 blocks scheduling the put-up
@@ -81,6 +112,17 @@ These amend "Scaffolding CRM — Agreed Spec & Build Handoff". Fold them into th
   failed conversion as a 503 with LibreOffice's message. First tested on Windows with real local Supabase.
 - **Pricing and input errors are 422s, not server errors.** "No rate set", "no fixed price" and missing unit prices now
   reach the user as a readable message.
+- **Local development:** stop the API with Ctrl+C rather than closing its terminal. Closing it can leave a hidden
+  worker process holding port 8000 and serving old code; Windows then lets two programs share the port.
+
+## Next session (Keith, 29 Oct 2026)
+- Work through the empty navigation sections, in the spec's build order: the allocation board and an inspections list
+  first, then the money slice (invoices, rates, timesheets, pay), then stock, documents and reports.
+- Build the monetisation workflow above: firm sign-up, trial with countdown and cancel, Stripe Checkout and webhooks,
+  tier limits, read-only on lapse, Stripe customer portal. Settle the Full tier first.
+- Invite people to a firm (owner enters email, role, position; they sign in on their own phone and save their own
+  signature and PIN).
+- Fold this file into an updated spec document so a new chat starts from one accurate record.
 
 ## Still to build around signatures
 - Operatives signing on to the issued method statement (`rams_signons`), with re-authentication.

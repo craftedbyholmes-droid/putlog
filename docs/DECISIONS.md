@@ -5,7 +5,7 @@ These amend "Scaffolding CRM — Agreed Spec & Build Handoff". Fold them into th
 ## Confirmed by Keith
 - **Name: Putlog.** Name checks (Companies House, UK IPO classes 9 and 42, domains) still to do.
 - **Stack:** Next.js 16 (App Router, TypeScript, Tailwind 4, shadcn-style components kept in the repo), FastAPI on
-  Python 3.14, Supabase (London) with RLS, Railway. The website talks to Supabase directly for simple screens; the API
+  Python 3.14, Supabase with RLS, Railway. The website talks to Supabase directly for simple screens; the API
   does calculations, documents, PDFs and uploads. Both use the user's own login, so RLS always applies.
 - **One PDF engine.** WeasyPrint is dropped. Quotes come from a fifth Word template, `Quote_TEMPLATE.docx`, filled the
   same way as the other documents and converted by LibreOffice.
@@ -54,6 +54,13 @@ These amend "Scaffolding CRM — Agreed Spec & Build Handoff". Fold them into th
   current one; the owner can reset a forgotten PIN. Signature images sit in a private bucket and are only read
   server-side. Size and position in the signed PDF checked and approved by Keith. **The statement and button wording
   are draft, for the solicitor to review.**
+- **Metres or feet in every length box (30 Oct 2026).** Elevation length and height, as-built figures, the HAKI target
+  height and a custom bottom lift accept metres (`10.5`) or feet (`33ft`, `33'`, `33' 6"`, phone curly quotes too).
+  Feet are converted and rounded to a 0.5 m step; the conversion shows while typing so the rounding is never hidden;
+  metres are what is saved. **Elevation and as-built measurements round up** to the next 0.5 m, so the firm never
+  quotes less scaffold than it builds (rounding to the nearest could move a 20 m × 10 m elevation by up to about
+  7.6 m²). **HAKI tower heights and the bottom lift round to the nearest 0.5 m.** A figure typed in metres is kept
+  exactly as typed (adopted default, Keith to confirm). Checks: `node --experimental-strip-types web/lib/measure.check.mjs`.
 - **RAMS produced before work starts;** the rule 2 gate is unchanged.
 - **RAMS layout:** logo top right then the document name, in a real page header on every page. All templates name the
   logo picture `logo`.
@@ -75,6 +82,9 @@ Replaces the spec's Open pricing item (Basic £19.99 / Full £24.99).
   always be able to produce its signed safety paperwork for the HSE or a principal contractor.
 - Self-service card changes, plan changes and cancellation go through Stripe's customer portal.
 - Tier limits are enforced by the API and the database, never only by hiding buttons.
+- **Price floor (30 Oct 2026):** what the first test firm (Keith's brother, a careful spender) will actually pay is
+  Keith's bottom estimate of the product's value. Ask for a commitment after the trial ("card in at £35.99, or the price
+  you would put your card in at"), not an opinion; the other test firms show how far above the floor the price sits.
 
 ### Monetisation, still open
 - **Full tier:** its price and what it adds (the client portal is the spec's candidate).
@@ -85,7 +95,31 @@ Replaces the spec's Open pricing item (Basic £19.99 / Full £24.99).
 - **How long read-only data is kept after a firm stops paying** (for example 6 years, in line with how long safety
   records are commonly kept), and how that is told to the firm. Check retention against the HSE's expectations.
 - **Firm self sign-up** (create firm and owner login, then Stripe Checkout) and **inviting people** to a firm are both
-  still to build; today logins exist only in the demo data.
+  still to build; today logins are created by `scripts/hosted_setup.py`.
+
+## Hosting (set up 30 Oct 2026)
+- **GitHub:** private repository `craftedbyholmes-droid/putlog`, the backup and Railway's source. Run `git push` after
+  every commit.
+- **Supabase (hosted):** project `lfoiiktjihhozfctsjcb`, region **West EU (Ireland, eu-west-1)**, not London as the spec
+  planned. Fine for testing; state the data location in the privacy policy, and decide before real firms whether to
+  move to London. Free plan: no backups and it pauses when idle, so fake data only until Supabase Pro. Public sign-up
+  is switched off. Migrations go up with `npx supabase db push` (never `--include-seed`: the seed has demo logins with
+  a known password).
+- **Database password:** letters and digits only, so the connection address never needs encoding. Railway and the
+  setup script connect through the **session pooler** (`aws-0-eu-west-1.pooler.supabase.com`, port 5432); the direct
+  address is IPv6-only.
+- **Railway:** project `putlog`, two services built from GitHub `main`. **api**: built from the repo root with
+  `RAILWAY_DOCKERFILE_PATH=api/Dockerfile`, at https://putlog-production.up.railway.app (`/health` shows `"pdf": true`).
+  **web**: root directory `web`, at https://web-production-8238f.up.railway.app. Both use the **legacy** `anon` and
+  `service_role` keys (the file storage code sends the key as a bearer token). `WEB_ORIGINS` on api must equal the web
+  address exactly (https, no trailing slash), or the browser shows "Failed to fetch". `NEXT_PUBLIC_` settings are baked
+  into the website when it is built, so changing one needs a redeploy of web. Check both services run in an EU region.
+- **Test firm:** Bear Scaffolding (owner James Holmes, competent inspector and RAMS signer; office login Keith Holmes),
+  with fake clients, jobs, staff, vans and rates, created by `scripts/hosted_setup.py` (prompts for every secret, safe
+  to rerun, ends by generating a RAMS on Railway and saving the PDF to the Desktop).
+- **First Railway PDF (30 Oct 2026):** tables and filled fields correct. The RAMS templates' page numbers are typed as
+  ordinary text, so on Railway's fonts they drift into the middle of pages and leave gaps: replace them with real
+  page-number footers. Some numbered points in the cleaned template run together on one line (cosmetic, later).
 
 ## Found during the build
 - **Rule 2 vs the RAMS dates.** The RAMS needs the erection date and manpower, but rule 2 blocks scheduling the put-up
@@ -115,13 +149,15 @@ Replaces the spec's Open pricing item (Basic £19.99 / Full £24.99).
 - **Local development:** stop the API with Ctrl+C rather than closing its terminal. Closing it can leave a hidden
   worker process holding port 8000 and serving old code; Windows then lets two programs share the port.
 
-## Next session (Keith, 29 Oct 2026)
-- Work through the empty navigation sections, in the spec's build order: the allocation board and an inspections list
-  first, then the money slice (invoices, rates, timesheets, pay), then stock, documents and reports.
-- Build the monetisation workflow above: firm sign-up, trial with countdown and cancel, Stripe Checkout and webhooks,
-  tier limits, read-only on lapse, Stripe customer portal. Settle the Full tier first.
-- Invite people to a firm (owner enters email, role, position; they sign in on their own phone and save their own
-  signature and PIN).
+## Next (30 Oct 2026)
+- Before James's test: real page-number footers in the RAMS templates; the PDF speed-up if Regenerate takes over about
+  20 seconds on Railway; check both Railway services are in an EU region; a look on a phone; the allocation board by
+  hand (test 12).
+- Ask James: why the method statement says the 7-day inspection is "If ordered by customer" (conflicts with rule 1; the
+  spec proposes a required choice of who inspects instead).
+- After his feedback: the allocation board and an inspections list, then the money slice (invoices, rates, timesheets,
+  pay), then stock, documents and reports; the monetisation workflow (sign-up, trial, Stripe, read-only on lapse);
+  inviting people to a firm.
 - Fold this file into an updated spec document so a new chat starts from one accurate record.
 
 ## Still to build around signatures

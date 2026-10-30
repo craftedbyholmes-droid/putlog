@@ -7,6 +7,7 @@ import { Badge, Button, Card, CardHeader, Empty, Field, Input, Modal, Notice, Se
 import { ConfirmErectedModal, InspectionModal, SheetModal, SignModal } from "@/components/scaffold/actions";
 import { cn, ftIn, gbp, ukDate } from "@/lib/utils";
 import { HakiResult } from "@/components/HakiResult";
+import { LengthInput } from "@/components/LengthInput";
 
 type Msg = { ok: boolean; text: string } | null;
 const STATUS_TONE: Record<string, any> = { planned: "slate", rams_raised: "violet", erecting: "blue", on_hire: "green", dismantle_requested: "amber", dismantling: "amber", dismantled: "slate" };
@@ -174,10 +175,10 @@ function EditScaffoldModal({ s, onClose, onSaved }: any) {
 function FirstLift({ value, onChange }: { value: number; onChange: (v: number) => void }) {
   const preset = value === 2 ? "2" : value === 3 ? "3" : "custom";
   return (
-    <Field label="Bottom lift" hint={value > 2 ? "Above 2 m: a bespoke design by a competent person is needed (no standard TG20 sheet covers it)." : "The only lift you can change; every lift above is 2 m."}>
+    <Field label="Bottom lift" hint={value > 2 ? "Above 2 m: a bespoke design by a competent person is needed (no standard TG20 sheet covers it)." : "The only lift you can change; every lift above is 2 m. A custom height can be typed in m or ft (rounded to the nearest 0.5 m)."}>
       <div className="flex gap-2">
         <Select className="w-44" value={preset} onChange={(e) => onChange(e.target.value === "custom" ? 2.5 : Number(e.target.value))}><option value="2">7 ft (2.0 m)</option><option value="3">10 ft (3.0 m)</option><option value="custom">Custom</option></Select>
-        {preset === "custom" && <Input inputMode="decimal" className="w-28" value={value} onChange={(e) => onChange(Number(e.target.value))} />}
+        {preset === "custom" && <LengthInput rounding="nearest" className="w-28" value={value} onCommit={(m) => onChange(m ?? 2)} ariaLabel="Custom bottom lift" />}
       </div>
     </Field>
   );
@@ -328,18 +329,19 @@ function Elevations({ s, companyId, reload }: any) {
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between"><span className="text-sm font-semibold">Elevations</span><Button size="sm" variant="secondary" onClick={add}>Add elevation</Button></div>
-      {rows.length === 0 ? <p className="text-xs text-slate-500">Enter each elevation's length and height once. Wages and hire reuse them.</p> : (
-        <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left text-xs text-slate-500"><th>Elev.</th><th>Length m</th><th>Height m</th><th>Area m²</th><th title="As-built changes pay, never the quote">As-built L × H</th><th /></tr></thead>
+      {rows.length === 0 ? <p className="text-xs text-slate-500">Enter each elevation's length and height once, in metres or feet. Wages and hire reuse them.</p> : (
+        <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left text-xs text-slate-500"><th>Elev.</th><th>Length</th><th>Height</th><th>Area m²</th><th title="As-built changes pay, never the quote">As-built L × H</th><th /></tr></thead>
           <tbody>{rows.map((r) => (
-            <tr key={r.id} className="border-t">
+            <tr key={r.id} className="border-t align-top">
               <td><Input className="min-h-8 w-14" defaultValue={r.label ?? ""} onBlur={(e) => upd(r.id, { label: e.target.value })} /></td>
-              <td><Input className="min-h-8 w-20" inputMode="decimal" defaultValue={r.quoted_length_m ?? ""} onBlur={(e) => upd(r.id, { quoted_length_m: e.target.value || null })} /></td>
-              <td><Input className="min-h-8 w-20" inputMode="decimal" defaultValue={r.quoted_height_m ?? ""} onBlur={(e) => upd(r.id, { quoted_height_m: e.target.value || null })} /></td>
-              <td className="px-1 font-medium">{r.quoted_area_m2 ?? "—"}</td>
-              <td className="whitespace-nowrap"><Input className="inline min-h-8 w-16" inputMode="decimal" defaultValue={r.asbuilt_length_m ?? ""} onBlur={(e) => upd(r.id, { asbuilt_length_m: e.target.value || null })} /> × <Input className="inline min-h-8 w-16" inputMode="decimal" defaultValue={r.asbuilt_height_m ?? ""} onBlur={(e) => upd(r.id, { asbuilt_height_m: e.target.value || null })} /></td>
+              <td><LengthInput rounding="up" className="min-h-8 w-24" value={r.quoted_length_m} onCommit={(m) => upd(r.id, { quoted_length_m: m })} ariaLabel="Length" /></td>
+              <td><LengthInput rounding="up" className="min-h-8 w-24" value={r.quoted_height_m} onCommit={(m) => upd(r.id, { quoted_height_m: m })} ariaLabel="Height" /></td>
+              <td className="px-1 pt-2 font-medium">{r.quoted_area_m2 ?? "—"}</td>
+              <td className="whitespace-nowrap"><LengthInput rounding="up" className="min-h-8 w-20" value={r.asbuilt_length_m} onCommit={(m) => upd(r.id, { asbuilt_length_m: m })} ariaLabel="As-built length" /> × <LengthInput rounding="up" className="min-h-8 w-20" value={r.asbuilt_height_m} onCommit={(m) => upd(r.id, { asbuilt_height_m: m })} ariaLabel="As-built height" /></td>
               <td><Button size="sm" variant="ghost" onClick={() => del(r.id)}>✕</Button></td>
             </tr>))}</tbody></table>
-          <div className="mt-1 text-right text-sm">Quoted area <b>{total.toFixed(2)} m²</b></div></div>)}
+          <div className="mt-1 text-right text-sm">Quoted area <b>{total.toFixed(2)} m²</b></div>
+          <p className="mt-1 text-xs text-slate-500">Type metres ({"10.5"}) or feet ({`33ft, 33' 6"`}). Feet are converted and rounded up to the next 0.5 m, so you never quote less than you build.</p></div>)}
       {height > 0 && <LiftLayout s={s} height={height} />}
     </div>
   );
@@ -368,7 +370,7 @@ function HakiPanel({ s, onMsg, reload }: any) {
     <div className="space-y-2">
       <div className="text-sm font-semibold">HAKI stair tower</div>
       <div className="grid grid-cols-2 gap-2">
-        <Field label="Target height (m)"><Input inputMode="decimal" value={f.target_m} onChange={(e) => setF({ ...f, target_m: Number(e.target.value) })} /></Field>
+        <Field label="Target height (m or ft)" hint={ftIn(f.target_m * 1000)}><LengthInput block rounding="nearest" value={f.target_m} onCommit={(m) => setF({ ...f, target_m: m ?? 0 })} ariaLabel="Target height" /></Field>
         <Field label="Lift height"><Select value={f.lift_m} onChange={(e) => setF({ ...f, lift_m: Number(e.target.value) })}><option value={1}>1 m</option><option value={1.5}>1.5 m</option><option value={2}>2 m</option></Select></Field>
         <Field label="Against the scaffold"><Select value={f.orientation} onChange={(e) => setF({ ...f, orientation: e.target.value })}><option value="width_against">Width (1655 mm)</option><option value="length_against">Length (3050 mm)</option></Select></Field>
       </div>

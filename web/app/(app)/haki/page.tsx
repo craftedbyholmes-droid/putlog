@@ -3,6 +3,7 @@ import { useState } from "react";
 import { api } from "@/lib/api";
 import { Button, Card, CardHeader, Field, Input, Notice, PageTitle, Select } from "@/components/ui";
 import { HakiResult } from "@/components/HakiResult";
+import { LengthInput } from "@/components/LengthInput";
 import { ftIn } from "@/lib/utils";
 
 /* Standalone stair tower calculator. To price a tower on a job, add a HAKI scaffold on the job page. */
@@ -16,7 +17,9 @@ export default function Haki() {
       <Notice msg={msg} onClose={() => setMsg(null)} />
       <div className="grid gap-4 lg:grid-cols-[22rem_1fr]">
         <Card className="space-y-3 p-4">
-          <Field label="Target height (m)" hint={`${ftIn(f.target_m * 1000)} · first platform sits at 0.5 m · cap 100 ft (30.48 m)`}><Input inputMode="decimal" value={f.target_m} onChange={(e) => setF({ ...f, target_m: Number(e.target.value) })} /></Field>
+          <Field label="Target height (m or ft)" hint={`${ftIn(f.target_m * 1000)} · feet round to the nearest 0.5 m · first platform sits at 0.5 m · cap 100 ft (30.48 m)`}>
+            <LengthInput block rounding="nearest" value={f.target_m} onCommit={(m) => setF({ ...f, target_m: m ?? 0 })} ariaLabel="Target height" />
+          </Field>
           <Field label="Lift height"><Select value={f.lift_m} onChange={(e) => setF({ ...f, lift_m: Number(e.target.value) })}><option value={1}>1 m</option><option value={1.5}>1.5 m</option><option value={2}>2 m</option></Select></Field>
           <Field label="Against the scaffold"><Select value={f.orientation} onChange={(e) => setF({ ...f, orientation: e.target.value })}><option value="width_against">Width (1655 mm): full-width access</option><option value="length_against">Length (3050 mm): side-exit section</option></Select></Field>
           <Field label="£ per vertical metre (optional)" hint="Priced on the target height for now"><Input inputMode="decimal" value={f.per_metre} onChange={(e) => setF({ ...f, per_metre: e.target.value })} /></Field>
